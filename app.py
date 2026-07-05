@@ -114,7 +114,7 @@ def build_markdown_report(analysis: dict, source_label: str) -> str:
 # ---------------------------------------------------------------------------
 with st.sidebar:
     st.header("\U0001F511 Connection")
-    env_key = os.environ.get("GEMINI_API_KEY", "")
+    env_key = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
     api_key = st.text_input(
         "Gemini API key", value=env_key, type="password",
         help="Get a free key at aistudio.google.com. Loaded from .env if set there.",
