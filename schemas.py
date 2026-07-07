@@ -12,7 +12,11 @@ response.
 """
 
 from typing import List, Optional, Literal
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, create_model
+
+from checklist_items import CHECKLIST_ITEMS
+
+_ITEM_COUNT = len(CHECKLIST_ITEMS)
 
 
 class Deliverable(BaseModel):
@@ -28,9 +32,10 @@ class Criterion(BaseModel):
 
 class ComplianceItem(BaseModel):
     item: str
-    status: Literal["MET", "GAP", "REVIEW"]
+    status: Literal["GO", "NO-GO", "REVIEW"]
     reason: str
     evidence: Optional[str] = None
+    pageRef: Optional[str] = None
 
 
 class KeyDatesBudget(BaseModel):
@@ -60,6 +65,44 @@ class Verdict(BaseModel):
     summary: str
 
 
+class RFPCoreAnalysis(BaseModel):
+    """Everything except the compliance checklist — asked for in its own,
+    smaller call so it isn't competing with the 34-item checklist for the
+    model's attention/output budget."""
+    verdict: Verdict
+    deliverables: List[Deliverable] = Field(default_factory=list)
+    evaluationCriteria: List[Criterion] = Field(default_factory=list)
+    keyDatesBudget: KeyDatesBudget = Field(default_factory=KeyDatesBudget)
+    risks: List[Risk] = Field(default_factory=list)
+    strengths: List[Strength] = Field(default_factory=list)
+
+
+class ComplianceChecklist(BaseModel):
+    """The full checklist in one shape — kept for backward-compat/testing,
+    but NOT used for the live API call anymore: a fixed length of 35 nested
+    objects is too large a constraint grammar for Gemini's controlled
+    generation to serve ("too many states" error). See
+    build_category_checklist_schema below for the schema actually used."""
+    items: List[ComplianceItem] = Field(min_length=_ITEM_COUNT, max_length=_ITEM_COUNT)
+
+
+def build_category_checklist_schema(count: int):
+    """
+    Dynamically builds a small, category-scoped checklist schema with an
+    exact-length constraint of `count` items. Splitting the 35-item checklist
+    into 4 per-department calls (6/13/11/5 items) keeps each call's
+    constraint grammar small enough for Gemini to actually serve, while still
+    guaranteeing an exact item count per call.
+    """
+    return create_model(
+        f"ComplianceChecklist{count}",
+        items=(List[ComplianceItem], Field(min_length=count, max_length=count)),
+    )
+
+
+# Kept for backward compatibility (e.g. dummy-data tests) — combines both
+# halves into the same shape the rest of the app (app.py, pdf_report.py)
+# already expects.
 class RFPAnalysis(BaseModel):
     verdict: Verdict
     deliverables: List[Deliverable] = Field(default_factory=list)

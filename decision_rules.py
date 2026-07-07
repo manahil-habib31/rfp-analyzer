@@ -50,13 +50,13 @@ def apply_hard_rules(data: dict, company_profile: dict) -> dict:
                 "Payment terms aren't clearly stated in the RFP — confirm manually before proceeding."
             )
         elif payment_days <= acceptable_days:
-            payment_item["status"] = "MET"
+            payment_item["status"] = "GO"
             payment_item["reason"] = (
                 f"NET{payment_days} is within the acceptable NET{acceptable_days} threshold — GO."
             )
             payment_item["evidence"] = f"RFP states payment terms of NET{payment_days}."
         else:
-            payment_item["status"] = "GAP"
+            payment_item["status"] = "NO-GO"
             payment_item["reason"] = (
                 f"NET{payment_days} exceeds the acceptable NET{acceptable_days} threshold — escalate to Accounting."
             )
@@ -74,13 +74,13 @@ def apply_hard_rules(data: dict, company_profile: dict) -> dict:
                 "Insurance requirement isn't clearly stated in the RFP — confirm manually before proceeding."
             )
         elif insurance_amount <= max_insurance:
-            insurance_item["status"] = "MET"
+            insurance_item["status"] = "GO"
             insurance_item["reason"] = (
                 f"${insurance_amount:,.0f} required is within the ${max_insurance:,.0f} available coverage — GO."
             )
             insurance_item["evidence"] = f"RFP states required insurance coverage of ${insurance_amount:,.0f}."
         else:
-            insurance_item["status"] = "GAP"
+            insurance_item["status"] = "NO-GO"
             insurance_item["reason"] = (
                 f"${insurance_amount:,.0f} required exceeds the ${max_insurance:,.0f} available coverage — NO-GO."
             )

@@ -75,6 +75,8 @@ CHECKLIST_ITEMS = [
      "question": "Is a specific authorized signatory required for the proposal?"},
     {"category": "operations", "item": "Vendor Registration",
      "question": "Is registration in the client's e-procurement or vendor portal required?"},
+    {"category": "operations", "item": "Checklist of Required Documents",
+     "question": "Has every required document and form been cross-checked against the RFP's own submission checklist before sending?"},
 
     # TECHNICAL
     {"category": "technical", "item": "Scope of Services/Products Alignment",

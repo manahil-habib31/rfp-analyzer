@@ -27,11 +27,11 @@ TONE_COLORS = {
 }
 TONE_HEX = {"GO": "#1f9d6b", "CONDITIONAL": "#b7791f", "NO-GO": "#d6453d"}
 STATUS_COLORS = {
-    "MET": colors.HexColor("#1f9d6b"),
-    "GAP": colors.HexColor("#d6453d"),
+    "GO": colors.HexColor("#1f9d6b"),
+    "NO-GO": colors.HexColor("#d6453d"),
     "REVIEW": colors.HexColor("#6b7280"),
 }
-STATUS_HEX = {"MET": "#1f9d6b", "GAP": "#d6453d", "REVIEW": "#6b7280"}
+STATUS_HEX = {"GO": "#1f9d6b", "NO-GO": "#d6453d", "REVIEW": "#6b7280"}
 SEVERITY_COLORS = {
     "HIGH": colors.HexColor("#d6453d"),
     "MEDIUM": colors.HexColor("#b7791f"),
@@ -111,6 +111,38 @@ def generate_pdf_report(analysis: dict, source_label: str) -> bytes:
         ("BOTTOMPADDING", (0, 0), (-1, -1), 12),
     ]))
     story.append(verdict_table)
+
+    # Department compliance scorecard
+    dept_scores = analysis.get("departmentScores", {})
+    if dept_scores:
+        story.append(Spacer(1, 10))
+        overall = dept_scores.get("overall", {})
+        rows = [[
+            Paragraph("<b>Department / Category</b>", ss["RFPCell"]),
+            Paragraph("<b>Score</b>", ss["RFPCell"]),
+            Paragraph("<b>Recommendation</b>", ss["RFPCell"]),
+            Paragraph("<b>Summary</b>", ss["RFPCell"]),
+        ]]
+        rec_hex = {"Proceed": "#1f9d6b", "Review Needed": "#b7791f", "High Risk": "#d6453d"}
+        def score_row(title, s, bold=False):
+            rc = rec_hex.get(s.get("recommendation"), "#888888")
+            name_style = ss["RFPCellBold"] if bold else ss["RFPCell"]
+            return [
+                Paragraph(title, name_style),
+                Paragraph(f"{s.get('score','—')}%", name_style),
+                Paragraph(f'<font color="{rc}"><b>{s.get("recommendation","")}</b></font>', ss["RFPCell"]),
+                Paragraph(s.get("summary", ""), ss["RFPCell"]),
+            ]
+        rows.append(score_row("OVERALL COMPLIANCE", overall, bold=True))
+        for cat in CATEGORY_ORDER:
+            s = dept_scores.get("byCategory", {}).get(cat)
+            if s:
+                rows.append(score_row(s.get("title", cat), s))
+        story.append(_table(rows, [1.5 * inch, 0.7 * inch, 1.1 * inch, 3.1 * inch]))
+        story.append(Paragraph(
+            "Scores are computed directly from the checklist below (GO=100, REVIEW=50, NO-GO=0, averaged per department), not separately judged by the AI.",
+            ParagraphStyle(name="ScoreNote", parent=ss["Normal"], fontSize=7.5, textColor=colors.HexColor("#999999")),
+        ))
 
     # Deliverables
     deliverables = analysis.get("deliverables", []) or []
@@ -200,6 +232,8 @@ def generate_pdf_report(analysis: dict, source_label: str) -> bytes:
             status = it.get("status", "REVIEW")
             status_hex = STATUS_HEX.get(status, "#6b7280")
             evidence = it.get("evidence") or '<font color="#999999">Not cited in RFP</font>'
+            if it.get("pageRef"):
+                evidence = f"{evidence} <font color=\"#999999\"><i>({it['pageRef']})</i></font>"
             rows.append([
                 Paragraph(f"<b>{it.get('item','')}</b>", ss["RFPCell"]),
                 Paragraph(f'<font color="{status_hex}"><b>{status}</b></font>', ss["RFPCell"]),

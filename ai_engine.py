@@ -25,9 +25,10 @@ import time
 from google import genai
 from google.genai import types, errors
 
-from checklist_items import CHECKLIST_ITEMS, CATEGORY_ORDER
-from schemas import RFPAnalysis
+from checklist_items import CHECKLIST_ITEMS, CATEGORY_ORDER, CATEGORY_META
+from schemas import RFPAnalysis, RFPCoreAnalysis, ComplianceChecklist, build_category_checklist_schema
 from decision_rules import apply_hard_rules
+from scoring import compute_scores
 
 MODEL_NAME = "gemini-2.5-flash"
 MAX_RETRIES = 4
@@ -44,37 +45,16 @@ class AnalysisError(Exception):
     pass
 
 
-def _build_system_prompt(company_profile: dict) -> str:
-    item_list = "\n".join(
-        f"{i+1}. [{it['category']}] {it['item']} — {it['question']}"
-        for i, it in enumerate(CHECKLIST_ITEMS)
-    )
+def _build_core_system_prompt(company_profile: dict) -> str:
     profile_lines = "\n".join(f"- {k}: {v}" for k, v in company_profile.items())
-
-    return f"""You are an RFP capture assistant. You read an incoming RFP and evaluate it
-against the company's standing checklist AND its specific profile/capabilities, item by item.
+    return f"""You are an RFP capture assistant. You read an incoming RFP and produce a high-level
+qualification assessment for a Proposal Capture Manager, weighing it against the company's
+profile below.
 
 COMPANY PROFILE (use this to judge fit, not generic assumptions):
 {profile_lines}
 
-CHECKLIST — answer every one of these {len(CHECKLIST_ITEMS)} items, in this exact order:
-{item_list}
-
-For each checklist item, decide:
-- "status": "MET" (requirement is satisfied or favorable given the company profile),
-  "GAP" (requirement is not satisfied, or a hard threshold is exceeded), or
-  "REVIEW" (needs a human judgment call, or the RFP doesn't provide enough detail).
-- Hard rule for "Payment Terms": NET30 or better -> MET. Worse than NET30 -> GAP
-  (note it should be escalated to Accounting).
-- Hard rule for "Insurance Requirements": required coverage <= the company's
-  max_insurance_available_usd -> MET. Above it -> GAP.
-- "reason": one or two sentences grounded in the RFP text, explaining the decision.
-  If the RFP doesn't mention it, say so plainly.
-- "evidence": the specific supporting text from the RFP — a short direct quote or close
-  paraphrase, ideally with a section/clause reference (e.g. "Section 4.2: ..."). If the
-  RFP genuinely doesn't address this item, set evidence to null rather than inventing one.
-
-Also produce:
+Produce:
 - An overall verdict: "score" (0-100 fit score), "tag" ("GO", "CONDITIONAL", or "NO-GO"),
   and a 2-4 sentence "summary" explaining the call for a Proposal Capture Manager.
 - "deliverables": each with "description", "mandatory" (true/false — false if optional/
@@ -84,25 +64,50 @@ Also produce:
   "contractValueUSD" (number or null), "paymentTermsDays" (number or null),
   "insuranceAmountUSD" (number or null), "bondRequired" (true/false/null), "bondDetails"}}.
 - "risks": 3-6 entries, each {{"risk", "severity": "HIGH"|"MEDIUM"|"LOW", "note"}},
-  covering the most significant reasons to hesitate on this bid (or state there are
-  no significant risks if that's genuinely the case).
+  covering the most significant reasons to hesitate on this bid.
 - "strengths": 3-6 entries, each {{"point", "note"}}, covering the most significant reasons
   TO pursue this bid — favorable terms, strong capability alignment, relationship value, etc.
-  This is the positive counterpart to "risks": together they should give a Proposal Capture
-  Manager a balanced strengths-vs-weaknesses view, not just a list of problems.
 
-Respond with ONLY a raw JSON object (no commentary, no markdown fences) matching:
-{{
-  "verdict": {{"score": number, "tag": "GO"|"CONDITIONAL"|"NO-GO", "summary": "string"}},
-  "deliverables": [{{"description": "string", "mandatory": boolean, "effortEstimateWeeks": number|null}}],
-  "evaluationCriteria": [{{"criterion": "string", "weightPercent": number|null}}],
-  "compliance": [{{"item": "exact item name from the checklist above", "status": "MET"|"GAP"|"REVIEW", "reason": "string", "evidence": "string|null"}}],
-  "keyDatesBudget": {{"submissionDeadline": "string|null", "submissionDeadlineISO": "string|null", "contractValueUSD": number|null, "paymentTermsDays": number|null, "insuranceAmountUSD": number|null, "bondRequired": boolean|null, "bondDetails": "string|null"}},
-  "risks": [{{"risk": "string", "severity": "HIGH"|"MEDIUM"|"LOW", "note": "string"}}],
-  "strengths": [{{"point": "string", "note": "string"}}]
-}}
-"compliance" must contain exactly the same {len(CHECKLIST_ITEMS)} items, in the same order,
-with the exact item names given above — do not add, remove, reorder, or rename any."""
+Respond with ONLY a raw JSON object (no commentary, no markdown fences)."""
+
+
+def _build_compliance_system_prompt(company_profile: dict, category: str) -> str:
+    cat_items = [it for it in CHECKLIST_ITEMS if it["category"] == category]
+    item_list = "\n".join(
+        f"{i+1}. {it['item']} — {it['question']}"
+        for i, it in enumerate(cat_items)
+    )
+    profile_lines = "\n".join(f"- {k}: {v}" for k, v in company_profile.items())
+    cat_title = CATEGORY_META[category]["title"]
+
+    return f"""You are an RFP compliance assistant. Your ONLY job is to answer a fixed checklist
+of {len(cat_items)} {cat_title} items against the RFP text below — nothing else. This is the
+entire task; do not summarize the RFP, do not skip items, do not stop early.
+
+COMPANY PROFILE (use this to judge fit, not generic assumptions):
+{profile_lines}
+
+CHECKLIST — you MUST answer every single one of these {len(cat_items)} items, in this
+exact order, with the exact item name given (do not paraphrase or rename):
+{item_list}
+
+For EACH item, decide:
+- "status": "GO" (requirement is satisfied or favorable given the company profile),
+  "NO-GO" (requirement is not satisfied, or a hard threshold is exceeded), or
+  "REVIEW" (needs a human judgment call, or the RFP doesn't provide enough detail).
+- Hard rule for "Payment Terms": NET30 or better -> GO. Worse than NET30 -> NO-GO.
+- Hard rule for "Insurance Requirements": required coverage <= the company's
+  max_insurance_available_usd -> GO. Above it -> NO-GO.
+- "reason": one or two sentences grounded in the RFP text. If the RFP doesn't mention this
+  item at all, say so plainly (e.g. "Not addressed in the RFP") rather than leaving it out.
+- "evidence": a short direct quote or close paraphrase from the RFP. If the RFP genuinely
+  doesn't address the item, set evidence to null.
+- "pageRef": the page number the evidence came from, if you can tell — the RFP text below
+  is marked with "--- Page N ---" headers; cite the page the relevant text appeared under
+  (e.g. "Page 3"). If you can't tell, set pageRef to null rather than guessing.
+
+It is critical that your response contains all {len(cat_items)} items — a response with
+fewer items is invalid."""
 
 
 def _is_daily_quota_error(err: errors.APIError) -> bool:
@@ -110,9 +115,11 @@ def _is_daily_quota_error(err: errors.APIError) -> bool:
     return "quota" in msg and ("day" in msg or "daily" in msg or "per day" in msg)
 
 
-def _call_gemini_with_retry(client, system_prompt: str, rfp_text: str):
-    """Calls Gemini, retrying transient errors with exponential backoff.
-    Returns the parsed RFPAnalysis object (or raw dict as a fallback).
+def _call_gemini_with_retry(client, system_prompt: str, rfp_text: str, response_schema, max_output_tokens: int = 8192):
+    """Generic Gemini caller with retry/backoff, reused for both the core
+    analysis call and the dedicated compliance call. Returns the parsed
+    object (typed per response_schema) or, if schema validation didn't
+    populate .parsed, the raw response text as a fallback.
     Raises QuotaExhaustedError or AnalysisError."""
     backoff = INITIAL_BACKOFF_SECONDS
     last_error = None
@@ -125,18 +132,13 @@ def _call_gemini_with_retry(client, system_prompt: str, rfp_text: str):
                 config=types.GenerateContentConfig(
                     system_instruction=system_prompt,
                     response_mime_type="application/json",
-                    response_schema=RFPAnalysis,
-                    max_output_tokens=8192,
+                    response_schema=response_schema,
+                    max_output_tokens=max_output_tokens,
                     thinking_config=types.ThinkingConfig(thinking_budget=0),
                 ),
             )
-            # When response_schema is set, the SDK auto-parses into that type.
             if getattr(response, "parsed", None) is not None:
                 return response.parsed
-            # Fallback: parse the raw text ourselves if .parsed didn't populate
-            # (e.g. the model's output didn't strictly validate against the
-            # schema — this still gives us something to work with rather than
-            # failing outright).
             text = (response.text or "").strip()
             if not text:
                 raise AnalysisError("Gemini returned an empty response.")
@@ -150,16 +152,13 @@ def _call_gemini_with_retry(client, system_prompt: str, rfp_text: str):
                         "It resets at midnight Pacific time — try again tomorrow, or enable "
                         "billing on the Google Cloud project to lift the cap."
                     ) from e
-                # per-minute rate limit — worth retrying
                 last_error = e
                 time.sleep(backoff)
                 backoff *= 2
                 continue
-            # other 4xx errors (bad key, bad request, permission) are not retryable
             raise AnalysisError(f"Gemini rejected the request: {e}") from e
 
         except errors.ServerError as e:
-            # transient 500/503 — worth retrying
             last_error = e
             time.sleep(backoff)
             backoff *= 2
@@ -174,43 +173,82 @@ def _call_gemini_with_retry(client, system_prompt: str, rfp_text: str):
     )
 
 
+def _parse_fallback_json(result, label: str) -> dict:
+    """Defensive raw-JSON parse for when schema validation didn't populate
+    .parsed (result is a raw string in that case)."""
+    cleaned = result.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`")
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:]
+    cleaned = cleaned.strip()
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError as e:
+        preview = cleaned[:300].replace("\n", " ")
+        raise AnalysisError(
+            f"Could not parse Gemini's {label} response as JSON: {e}. Got: \"{preview}...\""
+        ) from e
+
+
 def analyze_rfp(rfp_text: str, company_profile: dict, api_key: str) -> dict:
     """
-    Runs the full analysis: builds the prompt, calls Gemini with retry/backoff,
-    parses the JSON, and merges the compliance results back onto the fixed
-    checklist so the report always covers exactly the 34 items regardless of
-    how the model orders its response.
+    Runs the full analysis as multiple Gemini calls:
+      1. Core analysis (verdict, deliverables, criteria, dates/budget, risks, strengths).
+      2. The compliance checklist, split into one call PER DEPARTMENT (Financial,
+         Legal, Operations, Technical) rather than one call for all 35 items.
+         Gemini's controlled generation rejects a single schema requiring an
+         exact-length array of 35 complex nested objects ("too many states for
+         serving") — splitting into 4 smaller exact-length arrays (6/13/11/5
+         items) keeps each call's constraint grammar small enough to serve,
+         while still guaranteeing an exact item count per department.
+    If any individual department call fails, the others still proceed — a
+    single failed department degrades to "REVIEW — not returned" for just
+    that department's items rather than failing the whole analysis.
+    Results are merged back onto the fixed checklist (so the report always
+    covers exactly the right items regardless of ordering) and the
+    deterministic hard-rule overrides are applied on top.
     """
     if not api_key:
         raise AnalysisError("No Gemini API key configured.")
 
     client = genai.Client(api_key=api_key)
-    system_prompt = _build_system_prompt(company_profile)
 
-    result = _call_gemini_with_retry(client, system_prompt, rfp_text)
-
-    if isinstance(result, RFPAnalysis):
-        # The schema-constrained path — already validated and typed.
-        data = result.model_dump()
+    # --- Call 1: core analysis ---
+    core_prompt = _build_core_system_prompt(company_profile)
+    core_result = _call_gemini_with_retry(client, core_prompt, rfp_text, RFPCoreAnalysis, max_output_tokens=4096)
+    if isinstance(core_result, RFPCoreAnalysis):
+        data = core_result.model_dump()
     else:
-        # Fallback path: result is a raw string (schema validation didn't
-        # populate .parsed). Parse it defensively.
-        cleaned = result.strip()
-        if cleaned.startswith("```"):
-            cleaned = cleaned.strip("`")
-            if cleaned.lower().startswith("json"):
-                cleaned = cleaned[4:]
-        cleaned = cleaned.strip()
-        try:
-            data = json.loads(cleaned)
-        except json.JSONDecodeError as e:
-            preview = cleaned[:300].replace("\n", " ")
-            raise AnalysisError(
-                f"Could not parse Gemini's response as JSON: {e}. Got: \"{preview}...\""
-            ) from e
+        data = _parse_fallback_json(core_result, "core analysis")
 
-    data["compliance"] = _merge_compliance(data.get("compliance", []))
+    # --- Calls 2-5: compliance checklist, one call per department ---
+    all_raw_items = []
+    compliance_errors = []
+    for category in CATEGORY_ORDER:
+        cat_count = len([it for it in CHECKLIST_ITEMS if it["category"] == category])
+        if cat_count == 0:
+            continue
+        try:
+            prompt = _build_compliance_system_prompt(company_profile, category)
+            schema = build_category_checklist_schema(cat_count)
+            result = _call_gemini_with_retry(client, prompt, rfp_text, schema, max_output_tokens=4096)
+            if hasattr(result, "model_dump"):
+                all_raw_items.extend(result.model_dump()["items"])
+            else:
+                parsed = _parse_fallback_json(result, f"{category} checklist")
+                all_raw_items.extend(parsed.get("items", parsed if isinstance(parsed, list) else []))
+        except (QuotaExhaustedError, AnalysisError) as e:
+            # Don't let one department's failure take down the whole analysis —
+            # record it and let _merge_compliance fill those items with the
+            # "not returned" placeholder so the rest of the report still works.
+            compliance_errors.append(f"{CATEGORY_META[category]['title']}: {e}")
+
+    data["compliance"] = _merge_compliance(all_raw_items)
+    if compliance_errors:
+        data["complianceWarnings"] = compliance_errors
     data = apply_hard_rules(data, company_profile)
+    data["departmentScores"] = compute_scores(data["compliance"])
     return data
 
 
@@ -231,5 +269,6 @@ def _merge_compliance(ai_items: list) -> list:
             "status": (found or {}).get("status", "REVIEW"),
             "reason": (found or {}).get("reason", "Not returned by the model — re-run the analysis or check this item manually."),
             "evidence": (found or {}).get("evidence"),
+            "pageRef": (found or {}).get("pageRef"),
         })
     return merged

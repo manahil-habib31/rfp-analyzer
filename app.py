@@ -37,7 +37,7 @@ if "source_label" not in st.session_state:
 if "company_profile" not in st.session_state:
     st.session_state.company_profile = dict(DEFAULT_COMPANY_PROFILE)
 
-STATUS_BADGE = {"MET": "\U0001F7E2 MET", "GAP": "\U0001F534 GAP", "REVIEW": "\u26AA REVIEW"}
+STATUS_BADGE = {"GO": "\U0001F7E2 GO", "NO-GO": "\U0001F534 NO-GO", "REVIEW": "\u26AA REVIEW"}
 TAG_BADGE = {"GO": "\U0001F7E2 GO", "CONDITIONAL": "\U0001F7E1 CONDITIONAL", "NO-GO": "\U0001F534 NO-GO"}
 SEVERITY_BADGE = {"HIGH": "\U0001F534 HIGH", "MEDIUM": "\U0001F7E1 MEDIUM", "LOW": "\u26AA LOW"}
 
@@ -53,6 +53,19 @@ def build_markdown_report(analysis: dict, source_label: str) -> str:
         v.get("summary", ""),
         "",
     ]
+    dept_scores = analysis.get("departmentScores", {})
+    if dept_scores:
+        overall = dept_scores.get("overall", {})
+        lines.append("## Compliance Evaluation Scores")
+        lines.append("")
+        lines.append("| Department / Category | Score | Recommendation | Summary |")
+        lines.append("|---|---|---|---|")
+        lines.append(f"| **OVERALL COMPLIANCE** | {overall.get('score','—')}% | {overall.get('recommendation','')} | {overall.get('summary','')} |")
+        for cat in CATEGORY_ORDER:
+            s = dept_scores.get("byCategory", {}).get(cat)
+            if s:
+                lines.append(f"| {s.get('title',cat)} | {s.get('score','—')}% | {s.get('recommendation','')} | {s.get('summary','')} |")
+        lines.append("")
     deliverables = analysis.get("deliverables", []) or []
     if deliverables:
         lines.append("## Deliverables")
@@ -102,6 +115,8 @@ def build_markdown_report(analysis: dict, source_label: str) -> str:
         for it in items:
             reason = (it.get("reason", "") or "").replace("|", "/")
             evidence = (it.get("evidence") or "Not cited in RFP").replace("|", "/")
+            if it.get("pageRef"):
+                evidence += f" ({it['pageRef']})"
             lines.append(f"| {it.get('item','')} | {it.get('status','')} | {reason} | {evidence} |")
         lines.append("")
     lines.append("---")
@@ -209,8 +224,8 @@ if analysis:
     v = analysis.get("verdict", {}) or {}
     deliverables = analysis.get("deliverables", []) or []
     compliance = analysis.get("compliance", []) or []
-    gaps = sum(1 for c in compliance if c.get("status") == "GAP")
-    met = sum(1 for c in compliance if c.get("status") == "MET")
+    gaps = sum(1 for c in compliance if c.get("status") == "NO-GO")
+    met = sum(1 for c in compliance if c.get("status") == "GO")
     total_weeks = sum(d.get("effortEstimateWeeks") or 0 for d in deliverables)
 
     st.divider()
@@ -225,6 +240,13 @@ if analysis:
     }.get(tag, "")
     banner_fn(f"**RECOMMENDATION: {tag}** (Score: {score}/100)  \n{banner_msg}")
 
+    if analysis.get("complianceWarnings"):
+        st.warning(
+            "Some parts of the compliance checklist couldn't be retrieved and are marked "
+            "REVIEW below — worth checking manually:\n\n"
+            + "\n".join(f"- {w}" for w in analysis["complianceWarnings"])
+        )
+
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Fit score", f"{score}/100")
     with m2:
@@ -232,7 +254,7 @@ if analysis:
         tag_color = {"GO": "green", "CONDITIONAL": "orange", "NO-GO": "red"}.get(tag, "gray")
         st.markdown(f":{tag_color}[**{TAG_BADGE.get(tag, tag)}**]")
     m3.metric("Deliverables / est. weeks", f"{len(deliverables)} / {total_weeks}")
-    m4.metric("Requirements met / gaps", f"{met} / {gaps}")
+    m4.metric("GO items / NO-GO items", f"{met} / {gaps}")
     st.info(v.get("summary", ""))
 
     tabs = st.tabs([
@@ -255,7 +277,34 @@ if analysis:
             st.progress(min(100, w or 0) / 100, text=f"{w}%" if w is not None else "weight not stated")
 
     with tabs[2]:
-        STATUS_COLOR = {"MET": "#1f9d6b", "GAP": "#d6453d", "REVIEW": "#8881a3"}
+        dept_scores = analysis.get("departmentScores", {})
+        if dept_scores:
+            overall = dept_scores.get("overall", {})
+            rec_color = {"Proceed": "#1f9d6b", "Review Needed": "#b7791f", "High Risk": "#d6453d"}.get(overall.get("recommendation"), "#888")
+            st.markdown(f"""
+            <div style="border:1px solid #333; border-radius:8px; padding:14px 16px; margin-bottom:14px;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+                    <span style="font-weight:700; font-size:14px;">OVERALL COMPLIANCE</span>
+                    <span style="font-weight:700; font-size:20px;">{overall.get('score','—')}%</span>
+                    <span style="background:{rec_color}22; color:{rec_color}; padding:3px 10px; border-radius:5px; font-size:12px; font-weight:700;">{overall.get('recommendation','')}</span>
+                </div>
+                <div style="font-size:12.5px; color:#aaa;">{overall.get('summary','')}</div>
+            </div>
+            """, unsafe_allow_html=True)
+            cols = st.columns(len(dept_scores.get("byCategory", {})) or 1)
+            for i, (cat, s) in enumerate(dept_scores.get("byCategory", {}).items()):
+                rc = {"Proceed": "#1f9d6b", "Review Needed": "#b7791f", "High Risk": "#d6453d"}.get(s.get("recommendation"), "#888")
+                with cols[i]:
+                    st.markdown(f"""
+                    <div style="border:1px solid #333; border-radius:8px; padding:10px 12px; text-align:center;">
+                        <div style="font-size:11px; color:#888; text-transform:uppercase;">{s.get('title','')}</div>
+                        <div style="font-size:22px; font-weight:700;">{s.get('score','—')}%</div>
+                        <div style="font-size:11px; color:{rc}; font-weight:700;">{s.get('recommendation','')}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+            st.caption("Scores are computed directly from the checklist below (GO=100, REVIEW=50, NO-GO=0, averaged per department) — not separately judged by the AI, so they're always consistent with the detailed results.")
+
+        STATUS_COLOR = {"GO": "#1f9d6b", "NO-GO": "#d6453d", "REVIEW": "#8881a3"}
         for cat in CATEGORY_ORDER:
             cat_items = [c for c in compliance if c.get("category") == cat]
             if not cat_items:
@@ -267,6 +316,9 @@ if analysis:
                     status = it.get("status", "REVIEW")
                     color = STATUS_COLOR.get(status, "#8881a3")
                     evidence = it.get("evidence") or "<span style='color:#888;'>Not cited in RFP</span>"
+                    page_ref = it.get("pageRef")
+                    if page_ref:
+                        evidence += f" <span style='color:#666; font-style:italic;'>({page_ref})</span>"
                     rows_html += f"""
                     <tr style="border-bottom:1px solid #333;">
                         <td style="padding:8px; vertical-align:top; font-weight:600; width:18%;">{it.get('item','')}</td>
