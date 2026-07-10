@@ -18,7 +18,7 @@ from reportlab.platypus import (
 )
 from reportlab.lib.enums import TA_CENTER
 
-from checklist_items import CATEGORY_META, CATEGORY_ORDER
+from checklist_items import CATEGORY_META, CATEGORY_ORDER, PRIORITY_RANK
 
 TONE_COLORS = {
     "GO": colors.HexColor("#1f9d6b"),
@@ -112,6 +112,34 @@ def generate_pdf_report(analysis: dict, source_label: str) -> bytes:
     ]))
     story.append(verdict_table)
 
+    # Fit Score breakdown — visible weighted components instead of one
+    # opaque number.
+    breakdown = verdict.get("breakdown", {})
+    if breakdown:
+        story.append(Spacer(1, 8))
+        labels = {
+            "strategicFit": "Strategic Fit", "financialTermsFit": "Financial Terms Fit",
+            "complianceReadiness": "Compliance Readiness", "riskLevel": "Risk Level (100=low risk)",
+        }
+        rows = [[
+            Paragraph("<b>Component</b>", ss["RFPCell"]), Paragraph("<b>Score</b>", ss["RFPCell"]),
+            Paragraph("<b>Weight</b>", ss["RFPCell"]), Paragraph("<b>Note</b>", ss["RFPCell"]),
+        ]]
+        for key, label in labels.items():
+            b = breakdown.get(key)
+            if b:
+                rows.append([
+                    Paragraph(label, ss["RFPCell"]),
+                    Paragraph(f"{b['score']}/100", ss["RFPCell"]),
+                    Paragraph(f"{b['weightPercent']}%", ss["RFPCell"]),
+                    Paragraph(str(b.get("note", "")), ss["RFPCell"]),
+                ])
+        story.append(_table(rows, [1.6 * inch, 0.8 * inch, 0.8 * inch, 3.2 * inch]))
+        story.append(Paragraph(
+            "Compliance Readiness is computed directly from the Compliance Checklist's overall score, not separately judged by the AI.",
+            ParagraphStyle(name="BreakdownNote", parent=ss["Normal"], fontSize=7.5, textColor=colors.HexColor("#999999")),
+        ))
+
     # Department compliance scorecard
     dept_scores = analysis.get("departmentScores", {})
     if dept_scores:
@@ -144,20 +172,50 @@ def generate_pdf_report(analysis: dict, source_label: str) -> bytes:
             ParagraphStyle(name="ScoreNote", parent=ss["Normal"], fontSize=7.5, textColor=colors.HexColor("#999999")),
         ))
 
-    # Deliverables
+    # Deliverables — numbered parent/child outline (1, 1.1, 1.2 ...), sorted
+    # mandatory-first then by priority, no department grouping. Each child
+    # point shows its section/page reference from the RFP when available.
     deliverables = analysis.get("deliverables", []) or []
     if deliverables:
         story.append(Paragraph("Deliverables", ss["RFPSection"]))
-        rows = [[Paragraph("<b>Deliverable</b>", ss["RFPCell"]), Paragraph("<b>Type</b>", ss["RFPCell"]), Paragraph("<b>Est. weeks</b>", ss["RFPCell"])]]
-        for d in deliverables:
+        total_days = sum(d.get("estimatedDays") or 0 for d in deliverables)
+        story.append(Paragraph(
+            f"{len(deliverables)} deliverables &middot; {total_days} days estimated total",
+            ParagraphStyle(name="DeliverableNote", parent=ss["Normal"], fontSize=8, textColor=colors.HexColor("#777777")),
+        ))
+        story.append(Spacer(1, 6))
+        sorted_deliverables = sorted(
+            deliverables,
+            key=lambda d: (not d.get("mandatory", False), -PRIORITY_RANK.get(d.get("priority", "Medium"), 2)),
+        )
+        PRIORITY_HEX = {"High": "#d6453d", "Medium": "#b7791f", "Low": "#6b7280"}
+        deliv_parent_style = ParagraphStyle(
+            name="DelivParent", parent=ss["Normal"], fontSize=9.5, fontName="Helvetica-Bold",
+            spaceBefore=8, spaceAfter=3, textColor=colors.HexColor("#1a1a2e"),
+        )
+        deliv_child_style = ParagraphStyle(
+            name="DelivChild", parent=ss["RFPCell"], leftIndent=16, spaceAfter=2,
+        )
+        for i, d in enumerate(sorted_deliverables, start=1):
             kind = "Mandatory" if d.get("mandatory") else "Optional"
-            weeks = d.get("effortEstimateWeeks")
-            rows.append([
-                Paragraph(str(d.get("description", "")), ss["RFPCell"]),
-                Paragraph(kind, ss["RFPCell"]),
-                Paragraph(str(weeks) if weeks is not None else "\u2014", ss["RFPCell"]),
-            ])
-        story.append(_table(rows, [4.2 * inch, 1.5 * inch, 1.1 * inch]))
+            days = d.get("estimatedDays")
+            priority = d.get("priority", "Medium")
+            p_hex = PRIORITY_HEX.get(priority, "#6b7280")
+            days_str = f" &middot; {days}d" if days is not None else ""
+            header = (
+                f"{i}. {d.get('description', '')} "
+                f'<font color="{p_hex}"><b>[{priority}]</b></font> '
+                f'<font color="#777777">({kind}{days_str})</font>'
+            )
+            story.append(Paragraph(header, deliv_parent_style))
+            points = d.get("points", []) or []
+            for j, p in enumerate(points, start=1):
+                point_text = p.get("point", "") if isinstance(p, dict) else str(p)
+                section_ref = p.get("sectionRef") if isinstance(p, dict) else None
+                page_ref = p.get("pageRef") if isinstance(p, dict) else None
+                ref_bits = [r for r in (section_ref, page_ref) if r]
+                ref_str = f' <font color="#999999"><i>({", ".join(ref_bits)})</i></font>' if ref_bits else ""
+                story.append(Paragraph(f"<b>{i}.{j}</b> {point_text}{ref_str}", deliv_child_style))
 
     # Evaluation criteria
     criteria = analysis.get("evaluationCriteria", []) or []

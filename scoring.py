@@ -80,3 +80,93 @@ def compute_scores(compliance: list) -> dict:
         },
         "byCategory": by_category,
     }
+
+
+# Weighted blend for the final Fit Score — visible and reproducible, instead
+# of one opaque AI-judged number. Three components come from the AI's own
+# sub-scores (strategic fit, financial terms, risk); the fourth,
+# "complianceReadiness", is NOT re-judged by the AI at all — it's the exact
+# same overall compliance percentage already computed from the 35-item
+# checklist (compute_scores, above), so the Fit Score can never silently
+# contradict the Compliance Checklist tab the way a fully independent AI
+# judgment could.
+VERDICT_WEIGHTS = {
+    "strategicFit": 0.30,
+    "financialTermsFit": 0.20,
+    "complianceReadiness": 0.30,
+    "riskLevel": 0.20,
+}
+
+
+def compute_final_verdict(verdict_components: dict, compliance_overall_score: float) -> dict:
+    """
+    verdict_components: the AI-supplied {"strategicFit": {"score","note"},
+    "financialTermsFit": {...}, "riskLevel": {...}, "summary": str}.
+    compliance_overall_score: the 0-100 overall score from compute_scores().
+
+    Returns a dict with the visible breakdown plus the computed total score
+    and a threshold-derived tag (GO >= 70, CONDITIONAL 40-69, NO-GO < 40).
+    The two deterministic hard rules (payment terms, insurance — see
+    decision_rules.py) are applied AFTER this and can still override the tag.
+    """
+    strategic = verdict_components.get("strategicFit", {}).get("score", 50)
+    financial = verdict_components.get("financialTermsFit", {}).get("score", 50)
+    risk = verdict_components.get("riskLevel", {}).get("score", 50)
+
+    total = (
+        VERDICT_WEIGHTS["strategicFit"] * strategic
+        + VERDICT_WEIGHTS["financialTermsFit"] * financial
+        + VERDICT_WEIGHTS["complianceReadiness"] * compliance_overall_score
+        + VERDICT_WEIGHTS["riskLevel"] * risk
+    )
+    total = round(total)
+
+    if total >= 70:
+        tag = "GO"
+    elif total >= 40:
+        tag = "CONDITIONAL"
+    else:
+        tag = "NO-GO"
+
+    breakdown = {
+        "strategicFit": {
+            "score": strategic, "weightPercent": int(VERDICT_WEIGHTS["strategicFit"] * 100),
+            "note": verdict_components.get("strategicFit", {}).get("note", ""),
+        },
+        "financialTermsFit": {
+            "score": financial, "weightPercent": int(VERDICT_WEIGHTS["financialTermsFit"] * 100),
+            "note": verdict_components.get("financialTermsFit", {}).get("note", ""),
+        },
+        "complianceReadiness": {
+            "score": round(compliance_overall_score), "weightPercent": int(VERDICT_WEIGHTS["complianceReadiness"] * 100),
+            "note": "Computed directly from the compliance checklist's overall score — not separately judged by the AI.",
+        },
+        "riskLevel": {
+            "score": risk, "weightPercent": int(VERDICT_WEIGHTS["riskLevel"] * 100),
+            "note": verdict_components.get("riskLevel", {}).get("note", ""),
+        },
+    }
+
+    return {
+        "score": total,
+        "tag": tag,
+        "summary": verdict_components.get("summary", ""),
+        "breakdown": breakdown,
+    }
+
+
+def compute_deliverable_totals(deliverables: list) -> dict:
+    """
+    Simple aggregate across the flat deliverables list (no department
+    grouping): total estimated days and a count by priority. Deterministic —
+    computed directly from the deliverables themselves, not separately
+    AI-judged.
+    """
+    from checklist_items import PRIORITY_RANK
+
+    total_days = sum(d.get("estimatedDays") or 0 for d in deliverables)
+    by_priority = {"High": 0, "Medium": 0, "Low": 0}
+    for d in deliverables:
+        p = d.get("priority", "Medium")
+        by_priority[p] = by_priority.get(p, 0) + 1
+    return {"totalDays": total_days, "byPriority": by_priority}

@@ -19,10 +19,24 @@ from checklist_items import CHECKLIST_ITEMS
 _ITEM_COUNT = len(CHECKLIST_ITEMS)
 
 
+class DeliverablePoint(BaseModel):
+    """A single child requirement/description item under a parent deliverable,
+    traceable back to where in the RFP it came from."""
+    point: str
+    sectionRef: Optional[str] = None  # e.g. "Section 4.2 - Insurance Requirements"
+    pageRef: Optional[str] = None     # e.g. "Page 3"
+
+
 class Deliverable(BaseModel):
+    """A parent deliverable (e.g. 'Insurance Documentation') expanded into its own
+    child requirement/description points (e.g. 'Certificate required', 'Coverage
+    $5M', 'Valid through contract period') — a flat two-level list, not grouped
+    by department."""
     description: str
     mandatory: bool
-    effortEstimateWeeks: Optional[float] = None
+    estimatedDays: Optional[int] = None
+    priority: Literal["High", "Medium", "Low"] = "Medium"
+    points: List[DeliverablePoint] = Field(default_factory=list, min_length=1)
 
 
 class Criterion(BaseModel):
@@ -59,9 +73,21 @@ class Strength(BaseModel):
     note: str
 
 
-class Verdict(BaseModel):
-    score: int
-    tag: Literal["GO", "CONDITIONAL", "NO-GO"]
+class ScoreComponent(BaseModel):
+    score: int  # 0-100, where 100 is best (for riskLevel: 100 = very low risk)
+    note: str
+
+
+class VerdictComponents(BaseModel):
+    """The AI supplies these three sub-scores plus a narrative summary.
+    The overall 0-100 score and GO/CONDITIONAL/NO-GO tag are NOT asked of the
+    model — they're computed deterministically afterward (see
+    ai_engine.compute_final_verdict), blended with the compliance checklist's
+    own score, so the final number is a visible, weighted breakdown rather
+    than one opaque AI judgment call."""
+    strategicFit: ScoreComponent  # capability/service alignment with the RFP's scope
+    financialTermsFit: ScoreComponent  # payment terms, insurance, bonding, budget feasibility
+    riskLevel: ScoreComponent  # 100 = very low risk, 0 = very high risk
     summary: str
 
 
@@ -69,7 +95,7 @@ class RFPCoreAnalysis(BaseModel):
     """Everything except the compliance checklist — asked for in its own,
     smaller call so it isn't competing with the 34-item checklist for the
     model's attention/output budget."""
-    verdict: Verdict
+    verdict: VerdictComponents
     deliverables: List[Deliverable] = Field(default_factory=list)
     evaluationCriteria: List[Criterion] = Field(default_factory=list)
     keyDatesBudget: KeyDatesBudget = Field(default_factory=KeyDatesBudget)
@@ -104,10 +130,30 @@ def build_category_checklist_schema(count: int):
 # halves into the same shape the rest of the app (app.py, pdf_report.py)
 # already expects.
 class RFPAnalysis(BaseModel):
-    verdict: Verdict
+    verdict: VerdictComponents
     deliverables: List[Deliverable] = Field(default_factory=list)
     evaluationCriteria: List[Criterion] = Field(default_factory=list)
     compliance: List[ComplianceItem] = Field(default_factory=list)
     keyDatesBudget: KeyDatesBudget = Field(default_factory=KeyDatesBudget)
     risks: List[Risk] = Field(default_factory=list)
     strengths: List[Strength] = Field(default_factory=list)
+
+
+# --- Proposal Outline (Stage 3: Proposal Planning) ---
+# Just the parent/child structure for now — a numbered outline of the
+# proposal response itself (e.g. "1. Technical Proposal" -> "1.1 Cover Page",
+# "1.2 Response to Scope of Services", ...). The AI only supplies titles;
+# section/sub-section numbers (1, 1.1, 1.2, 2, 2.1, ...) are computed
+# deterministically in code afterward, so numbering can never come back
+# wrong, duplicated, or out of order.
+class OutlineChild(BaseModel):
+    title: str
+
+
+class OutlineSection(BaseModel):
+    title: str
+    children: List[OutlineChild] = Field(min_length=1)
+
+
+class ProposalOutline(BaseModel):
+    sections: List[OutlineSection] = Field(min_length=1)

@@ -26,9 +26,9 @@ from google import genai
 from google.genai import types, errors
 
 from checklist_items import CHECKLIST_ITEMS, CATEGORY_ORDER, CATEGORY_META
-from schemas import RFPAnalysis, RFPCoreAnalysis, ComplianceChecklist, build_category_checklist_schema
+from schemas import RFPAnalysis, RFPCoreAnalysis, ComplianceChecklist, build_category_checklist_schema, ProposalOutline
 from decision_rules import apply_hard_rules
-from scoring import compute_scores
+from scoring import compute_scores, compute_deliverable_totals, compute_final_verdict
 
 MODEL_NAME = "gemini-2.5-flash"
 MAX_RETRIES = 4
@@ -55,10 +55,41 @@ COMPANY PROFILE (use this to judge fit, not generic assumptions):
 {profile_lines}
 
 Produce:
-- An overall verdict: "score" (0-100 fit score), "tag" ("GO", "CONDITIONAL", or "NO-GO"),
-  and a 2-4 sentence "summary" explaining the call for a Proposal Capture Manager.
-- "deliverables": each with "description", "mandatory" (true/false — false if optional/
-  nice-to-have), and "effortEstimateWeeks" (your best-effort numeric estimate, or null).
+- A "verdict" with THREE separate sub-scores (each 0-100) plus a narrative summary — do NOT
+  produce one single overall score; that gets computed afterward from these components plus
+  the compliance checklist, so a person can see exactly what's driving the result:
+  - "strategicFit": {{"score", "note"}} — how well the RFP's scope matches the company's
+    actual stated services/capabilities (from the profile above). Score this on genuine
+    alignment, not effort or possibility — a company COULD attempt unfamiliar work, but score
+    low if it's a real stretch from what the profile says the company does.
+  - "financialTermsFit": {{"score", "note"}} — how favorable the payment terms, insurance
+    requirement, bonding requirement, and budget/contract value are relative to the profile's
+    stated thresholds and capacity.
+  - "riskLevel": {{"score", "note"}} — 100 = very low risk, 0 = very high risk. Weigh
+    deadline pressure, ambiguity in scope, competitive/legal exposure, etc.
+  - "summary": 2-4 sentences synthesizing all of the above for a Proposal Capture Manager.
+- "deliverables": a flat list of parent deliverables — do NOT group or tag these by
+  department. Scan the ENTIRE RFP thoroughly for every distinct document, form,
+  submission, or artifact the vendor must provide (cover letter, references, insurance
+  certificate, technical narrative, pricing sheets, certifications, etc.) — RFPs commonly
+  have 6-12+ of these. Each deliverable has:
+    - "description": the deliverable's name/title (e.g. "Insurance Documentation",
+      "Technical Proposal", "Signed Certifications").
+    - "mandatory": true/false — false if optional/nice-to-have.
+    - "estimatedDays": your best-effort estimate of effort in days, or null.
+    - "priority": "High", "Medium", or "Low" — how critical this deliverable is to a
+      successful, compliant submission.
+    - "points": 2-6 child items — the specific requirements or description details that
+      belong under this deliverable, grounded in the RFP text. Each point has:
+        - "point": the requirement/description itself (e.g. "Certificate of insurance
+          required", "Coverage of at least $5,000,000").
+        - "sectionRef": the RFP section/clause this came from, if named or numbered in
+          the text (e.g. "Section 4.2", "Attachment C"). Set to null if the RFP doesn't
+          label sections or you can't tell.
+        - "pageRef": the page number, if you can tell — the RFP text below is marked with
+          "--- Page N ---" headers; cite the page the relevant text appeared under (e.g.
+          "Page 3"). Set to null rather than guessing if you can't tell.
+      Every deliverable must have at least one point.
 - "evaluationCriteria": [{{"criterion", "weightPercent"}}], ordered by weight descending.
 - "keyDatesBudget": {{"submissionDeadline", "submissionDeadlineISO" (YYYY-MM-DD or null),
   "contractValueUSD" (number or null), "paymentTermsDays" (number or null),
@@ -111,8 +142,13 @@ fewer items is invalid."""
 
 
 def _is_daily_quota_error(err: errors.APIError) -> bool:
-    msg = (getattr(err, "message", "") or str(err)).lower()
-    return "quota" in msg and ("day" in msg or "daily" in msg or "per day" in msg)
+    # The "per day" indicator lives inside the nested quotaId (e.g.
+    # "GenerateRequestsPerDayPerProjectPerModel-FreeTier"), not in the short
+    # .message field — checking .message alone (as a prior version of this
+    # function did) misses it entirely, since Gemini's top-level message text
+    # for this error never actually says "day". Check the full details too.
+    full_text = f"{getattr(err, 'message', '')} {getattr(err, 'details', '')}".lower()
+    return "quota" in full_text and ("perday" in full_text or "per day" in full_text or "daily" in full_text)
 
 
 def _call_gemini_with_retry(client, system_prompt: str, rfp_text: str, response_schema, max_output_tokens: int = 8192):
@@ -135,6 +171,7 @@ def _call_gemini_with_retry(client, system_prompt: str, rfp_text: str, response_
                     response_schema=response_schema,
                     max_output_tokens=max_output_tokens,
                     thinking_config=types.ThinkingConfig(thinking_budget=0),
+                    temperature=0.1,
                 ),
             )
             if getattr(response, "parsed", None) is not None:
@@ -189,6 +226,65 @@ def _parse_fallback_json(result, label: str) -> dict:
         raise AnalysisError(
             f"Could not parse Gemini's {label} response as JSON: {e}. Got: \"{preview}...\""
         ) from e
+
+
+def _build_outline_prompt(company_profile: dict) -> str:
+    return """You are a proposal planning assistant. Based on the RFP text below, produce a
+numbered outline for the PROPOSAL RESPONSE DOCUMENT itself (not a summary of the RFP) —
+the actual table of contents SPS would submit back to the client.
+
+Structure it as top-level sections (e.g. "Technical Proposal", "Financial Proposal",
+"Compliance & Administrative Documentation" — adapt these to what this specific RFP
+actually asks for), each containing an ordered list of sub-section titles that respond
+to what the RFP requires (e.g. "Cover Page", "Response to Scope of Services", "Ownership
+Details", "References", "Insurance Documentation", "Pricing Schedule", "Signed Certifications").
+
+Only include sections and sub-sections that are actually relevant to submitting a proposal
+in response to THIS RFP — ground it in the RFP's actual submission requirements, evaluation
+criteria, and required attachments/forms, not a generic template.
+
+Respond with ONLY a raw JSON object (no commentary, no markdown fences) matching:
+{
+  "sections": [
+    {"title": "string", "children": [{"title": "string"}, ...]},
+    ...
+  ]
+}
+Do not include section/sub-section numbers in the titles — numbering is added separately."""
+
+
+def _apply_outline_numbering(outline: dict) -> dict:
+    """Computes 1, 1.1, 1.2, 2, 2.1, ... numbering in code, rather than
+    trusting the model to number correctly — guarantees the numbering is
+    always sequential and never duplicated or out of order."""
+    numbered_sections = []
+    for i, section in enumerate(outline.get("sections", []), start=1):
+        children = []
+        for j, child in enumerate(section.get("children", []), start=1):
+            children.append({"number": f"{i}.{j}", "title": child.get("title", "")})
+        numbered_sections.append({
+            "number": str(i),
+            "title": section.get("title", ""),
+            "children": children,
+        })
+    return {"sections": numbered_sections}
+
+
+def generate_proposal_outline(rfp_text: str, company_profile: dict, api_key: str) -> dict:
+    """Stage 3 (Proposal Planning): generates a numbered parent/child outline
+    of the proposal response document itself. Kept as its own call/function
+    (not folded silently into analyze_rfp's internals) so it can be invoked,
+    tested, or reused independently."""
+    if not api_key:
+        raise AnalysisError("No Gemini API key configured.")
+    client = genai.Client(api_key=api_key)
+    prompt = _build_outline_prompt(company_profile)
+    result = _call_gemini_with_retry(client, prompt, rfp_text, ProposalOutline, max_output_tokens=2048)
+    if isinstance(result, ProposalOutline):
+        outline = result.model_dump()
+    else:
+        outline = _parse_fallback_json(result, "proposal outline")
+    return _apply_outline_numbering(outline)
 
 
 def analyze_rfp(rfp_text: str, company_profile: dict, api_key: str) -> dict:
@@ -247,8 +343,28 @@ def analyze_rfp(rfp_text: str, company_profile: dict, api_key: str) -> dict:
     data["compliance"] = _merge_compliance(all_raw_items)
     if compliance_errors:
         data["complianceWarnings"] = compliance_errors
-    data = apply_hard_rules(data, company_profile)
     data["departmentScores"] = compute_scores(data["compliance"])
+
+    # Blend the AI's three sub-scores with the deterministic compliance score
+    # into one visible, weighted Fit Score — replaces the raw VerdictComponents
+    # the core call returned with a flat {score, tag, summary, breakdown} dict.
+    data["verdict"] = compute_final_verdict(
+        data["verdict"], data["departmentScores"]["overall"]["score"]
+    )
+    # Hard-rule overrides (payment terms, insurance) run AFTER the blend, since
+    # they're policy, not opinion, and must be able to override the blended
+    # tag regardless of what the weighted score came out to.
+    data = apply_hard_rules(data, company_profile)
+
+    data["deliverableTotals"] = compute_deliverable_totals(data.get("deliverables", []))
+
+    # --- Call 6: proposal outline (Stage 3 planning) ---
+    try:
+        data["proposalOutline"] = generate_proposal_outline(rfp_text, company_profile, api_key)
+    except (QuotaExhaustedError, AnalysisError) as e:
+        data["proposalOutline"] = {"sections": []}
+        data["outlineWarning"] = str(e)
+
     return data
 
 

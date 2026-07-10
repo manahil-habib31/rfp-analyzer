@@ -18,7 +18,7 @@ from datetime import datetime
 import streamlit as st
 from dotenv import load_dotenv
 
-from checklist_items import CATEGORY_META, CATEGORY_ORDER, DEFAULT_COMPANY_PROFILE
+from checklist_items import CATEGORY_META, CATEGORY_ORDER, DEFAULT_COMPANY_PROFILE, PRIORITY_RANK
 from pdf_reader import extract_text_from_pdf, PDFExtractionError
 from ai_engine import analyze_rfp, QuotaExhaustedError, AnalysisError
 from pdf_report import generate_pdf_report
@@ -53,6 +53,22 @@ def build_markdown_report(analysis: dict, source_label: str) -> str:
         v.get("summary", ""),
         "",
     ]
+    breakdown = v.get("breakdown", {})
+    if breakdown:
+        lines.append("### Score Breakdown")
+        lines.append("")
+        lines.append("| Component | Score | Weight | Note |")
+        lines.append("|---|---|---|---|")
+        labels = {
+            "strategicFit": "Strategic Fit", "financialTermsFit": "Financial Terms Fit",
+            "complianceReadiness": "Compliance Readiness", "riskLevel": "Risk Level (100=low risk)",
+        }
+        for key, label in labels.items():
+            b = breakdown.get(key)
+            if b:
+                note = (b.get("note", "") or "").replace("|", "/")
+                lines.append(f"| {label} | {b['score']}/100 | {b['weightPercent']}% | {note} |")
+        lines.append("")
     dept_scores = analysis.get("departmentScores", {})
     if dept_scores:
         overall = dept_scores.get("overall", {})
@@ -69,12 +85,22 @@ def build_markdown_report(analysis: dict, source_label: str) -> str:
     deliverables = analysis.get("deliverables", []) or []
     if deliverables:
         lines.append("## Deliverables")
-        for d in deliverables:
-            kind = "Mandatory" if d.get("mandatory") else "Optional"
-            weeks = d.get("effortEstimateWeeks")
-            weeks_str = f" (~{weeks}w)" if weeks is not None else ""
-            lines.append(f"- **[{kind}]** {d.get('description','')}{weeks_str}")
         lines.append("")
+        for i, d in enumerate(deliverables, start=1):
+            kind = "Mandatory" if d.get("mandatory") else "Optional"
+            days = d.get("estimatedDays")
+            days_str = f" ({days}d)" if days is not None else ""
+            priority = d.get("priority", "Medium")
+            lines.append(f"### {i}. {d.get('description','')} — [{kind}, {priority}]{days_str}")
+            points = d.get("points", []) or []
+            for j, p in enumerate(points, start=1):
+                point_text = p.get("point", "") if isinstance(p, dict) else str(p)
+                section_ref = p.get("sectionRef") if isinstance(p, dict) else None
+                page_ref = p.get("pageRef") if isinstance(p, dict) else None
+                ref_bits = [r for r in (section_ref, page_ref) if r]
+                ref_str = f" _({', '.join(ref_bits)})_" if ref_bits else ""
+                lines.append(f"- **{i}.{j}** {point_text}{ref_str}")
+            lines.append("")
     criteria = analysis.get("evaluationCriteria", []) or []
     if criteria:
         lines.append("## Evaluation Criteria")
@@ -129,7 +155,7 @@ def build_markdown_report(analysis: dict, source_label: str) -> str:
 # ---------------------------------------------------------------------------
 with st.sidebar:
     st.header("\U0001F511 Connection")
-    env_key = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
+    env_key = os.environ.get("GEMINI_API_KEY", "")
     api_key = st.text_input(
         "Gemini API key", value=env_key, type="password",
         help="Get a free key at aistudio.google.com. Loaded from .env if set there.",
@@ -226,7 +252,7 @@ if analysis:
     compliance = analysis.get("compliance", []) or []
     gaps = sum(1 for c in compliance if c.get("status") == "NO-GO")
     met = sum(1 for c in compliance if c.get("status") == "GO")
-    total_weeks = sum(d.get("effortEstimateWeeks") or 0 for d in deliverables)
+    total_days = sum(d.get("estimatedDays") or 0 for d in deliverables)
 
     st.divider()
 
@@ -239,6 +265,28 @@ if analysis:
         "NO-GO": "This opportunity fails a hard requirement — recommend not pursuing as-is.",
     }.get(tag, "")
     banner_fn(f"**RECOMMENDATION: {tag}** (Score: {score}/100)  \n{banner_msg}")
+
+    breakdown = v.get("breakdown", {})
+    if breakdown:
+        with st.expander("Why this score? (weighted breakdown)", expanded=False):
+            labels = {
+                "strategicFit": "Strategic Fit",
+                "financialTermsFit": "Financial Terms Fit",
+                "complianceReadiness": "Compliance Readiness",
+                "riskLevel": "Risk Level (100 = low risk)",
+            }
+            for key, label in labels.items():
+                b = breakdown.get(key)
+                if not b:
+                    continue
+                st.markdown(f"**{label}** — {b['score']}/100 &nbsp; _(weight: {b['weightPercent']}%)_", unsafe_allow_html=True)
+                st.progress(b["score"] / 100)
+                st.caption(b["note"])
+            st.caption(
+                "Compliance Readiness is computed directly from the Compliance Checklist tab's "
+                "overall score — it is never separately judged by the AI, so it can't contradict "
+                "the detailed checklist results."
+            )
 
     if analysis.get("complianceWarnings"):
         st.warning(
@@ -253,21 +301,46 @@ if analysis:
         st.caption("Verdict")
         tag_color = {"GO": "green", "CONDITIONAL": "orange", "NO-GO": "red"}.get(tag, "gray")
         st.markdown(f":{tag_color}[**{TAG_BADGE.get(tag, tag)}**]")
-    m3.metric("Deliverables / est. weeks", f"{len(deliverables)} / {total_weeks}")
+    m3.metric("Deliverables / est. days", f"{len(deliverables)} / {total_days}")
     m4.metric("GO items / NO-GO items", f"{met} / {gaps}")
     st.info(v.get("summary", ""))
 
     tabs = st.tabs([
         "\U0001F4E6 Deliverables", "\U0001F4CA Evaluation Criteria",
         "\U0001F9FE Compliance Checklist", "\U0001F4C5 Dates & Budget",
-        "\u2696\uFE0F Strengths & Risks",
+        "\u2696\uFE0F Strengths & Risks", "\U0001F5C2\uFE0F Proposal Outline",
     ])
 
     with tabs[0]:
-        for d in deliverables:
+        PRIORITY_COLOR = {"High": "#d6453d", "Medium": "#b7791f", "Low": "#6b7280"}
+        if not deliverables:
+            st.caption("No deliverables extracted.")
+        sorted_deliverables = sorted(
+            deliverables,
+            key=lambda d: PRIORITY_RANK.get(d.get("priority", "Medium"), 2),
+            reverse=True,
+        )
+        for i, d in enumerate(sorted_deliverables, start=1):
             kind = "\U0001F534 Mandatory" if d.get("mandatory") else "\u26AA Optional"
-            weeks = d.get("effortEstimateWeeks")
-            st.markdown(f"**{kind}** — {d.get('description','')}" + (f"  _(~{weeks} weeks)_" if weeks is not None else ""))
+            days = d.get("estimatedDays")
+            priority = d.get("priority", "Medium")
+            pc = PRIORITY_COLOR.get(priority, "#6b7280")
+            st.markdown(
+                f"#### {i}. {d.get('description','')} "
+                + (f"<span style='font-size:12px; color:#888;'>&middot; \u23f1\ufe0f {days}d</span> " if days is not None else "")
+                + f"<span style='font-size:11px; font-weight:700; color:{pc}; background:{pc}22; padding:2px 8px; border-radius:5px;'>{priority}</span> "
+                + f"<span style='font-size:11px; color:#888;'>&nbsp;{kind}</span>",
+                unsafe_allow_html=True,
+            )
+            points = d.get("points", []) or []
+            for j, p in enumerate(points, start=1):
+                point_text = p.get("point", "") if isinstance(p, dict) else str(p)
+                section_ref = p.get("sectionRef") if isinstance(p, dict) else None
+                page_ref = p.get("pageRef") if isinstance(p, dict) else None
+                ref_bits = [r for r in (section_ref, page_ref) if r]
+                ref_str = f" <span style='color:#888; font-size:11px; font-style:italic;'>({', '.join(ref_bits)})</span>" if ref_bits else ""
+                st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;**{i}.{j}** {point_text}{ref_str}", unsafe_allow_html=True)
+            st.markdown("")
 
     with tabs[1]:
         criteria = analysis.get("evaluationCriteria", []) or []
@@ -372,6 +445,18 @@ if analysis:
             for r in risks:
                 st.markdown(f"**{SEVERITY_BADGE.get(r.get('severity'), r.get('severity',''))}** — {r.get('risk','')}")
                 st.caption(r.get("note", ""))
+
+    with tabs[5]:
+        if analysis.get("outlineWarning"):
+            st.warning(f"Outline generation had an issue: {analysis['outlineWarning']}")
+        outline = analysis.get("proposalOutline", {}) or {}
+        sections = outline.get("sections", [])
+        if not sections:
+            st.caption("No proposal outline generated.")
+        for section in sections:
+            st.markdown(f"**{section.get('number','')}. {section.get('title','')}**")
+            for child in section.get("children", []):
+                st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;{child.get('number','')} {child.get('title','')}", unsafe_allow_html=True)
 
     st.divider()
     dl1, dl2 = st.columns(2)

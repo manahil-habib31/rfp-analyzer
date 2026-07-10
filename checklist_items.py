@@ -98,6 +98,8 @@ CATEGORY_META = {
     "technical": {"title": "Technical", "emoji": "\U0001F6E0\uFE0F"},
 }
 
+PRIORITY_RANK = {"High": 3, "Medium": 2, "Low": 1}
+
 CATEGORY_ORDER = ["financial", "legal", "operations", "technical"]
 
 # Default SPS company profile, editable in the app sidebar. Values reflect
@@ -105,7 +107,9 @@ CATEGORY_ORDER = ["financial", "legal", "operations", "technical"]
 # $5M insurance ceiling) plus reasonable defaults for the rest.
 DEFAULT_COMPANY_PROFILE = {
     "company_name": "SPS",
-    "services": "Identity and Access Management (IAM), cybersecurity solutions, SOC/SIEM monitoring",
+    "services": "Identity and Access Management (IAM), cybersecurity solutions, SOC/SIEM monitoring, "
+                 "AI/ML-driven solutions (search, personalization, data platforms), and web application "
+                 "development and integration",
     "years_experience": 8,
     "max_insurance_available_usd": 5_000_000,
     "acceptable_payment_terms_days": 30,

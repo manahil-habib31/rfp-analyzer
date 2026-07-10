@@ -106,6 +106,15 @@ def apply_hard_rules(data: dict, company_profile: dict) -> dict:
             }[forced_tag]
             verdict["tag"] = forced_tag
             verdict["summary"] = (verdict.get("summary", "").rstrip(". ") + ". " + note).strip()
+            # Keep the numeric score consistent with the forced tag's band, so
+            # the displayed number can never contradict the label (e.g. a
+            # forced NO-GO showing a 75/100 would look like a bug, not policy).
+            score = verdict.get("score")
+            if isinstance(score, (int, float)):
+                if forced_tag == "NO-GO" and score >= 40:
+                    verdict["score"] = 39
+                elif forced_tag == "CONDITIONAL" and not (40 <= score <= 69):
+                    verdict["score"] = 69 if score >= 70 else 40
 
     data["verdict"] = verdict
     data["compliance"] = compliance
