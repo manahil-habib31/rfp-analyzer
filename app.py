@@ -19,7 +19,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from checklist_items import CATEGORY_META, CATEGORY_ORDER, DEFAULT_COMPANY_PROFILE, PRIORITY_RANK
-from pdf_reader import extract_text_from_pdf, PDFExtractionError
+from pdf_reader import extract_text_from_pdf, extract_text_from_documents, PDFExtractionError
 from ai_engine import analyze_rfp, QuotaExhaustedError, AnalysisError
 from pdf_report import generate_pdf_report
 
@@ -31,9 +31,11 @@ st.set_page_config(page_title="RFP Analyzer", page_icon="\U0001F4C4", layout="wi
 # Session state defaults
 # ---------------------------------------------------------------------------
 if "analysis" not in st.session_state:
-    st.session_state.analysis = None
+    st.session_state.analysis = None  # the single combined analysis result
 if "source_label" not in st.session_state:
-    st.session_state.source_label = None
+    st.session_state.source_label = None  # display label, e.g. "RFP_Main.pdf + 2 more"
+if "source_docs" not in st.session_state:
+    st.session_state.source_docs = []  # list of individual document names that went into it
 if "company_profile" not in st.session_state:
     st.session_state.company_profile = dict(DEFAULT_COMPANY_PROFILE)
 
@@ -44,8 +46,13 @@ SEVERITY_BADGE = {"HIGH": "\U0001F534 HIGH", "MEDIUM": "\U0001F7E1 MEDIUM", "LOW
 
 def build_markdown_report(analysis: dict, source_label: str) -> str:
     v = analysis.get("verdict", {}) or {}
+    rfp_identifier = analysis.get("rfpIdentifier")
     lines = [
         f"# RFP Analysis Report",
+    ]
+    if rfp_identifier:
+        lines.append(f"**RFP:** {rfp_identifier}  ")
+    lines += [
         f"**Source:** {source_label}  ",
         f"**Generated:** {datetime.now().strftime('%B %d, %Y')}",
         "",
@@ -95,9 +102,10 @@ def build_markdown_report(analysis: dict, source_label: str) -> str:
             points = d.get("points", []) or []
             for j, p in enumerate(points, start=1):
                 point_text = p.get("point", "") if isinstance(p, dict) else str(p)
+                doc_ref = p.get("docRef") if isinstance(p, dict) else None
                 section_ref = p.get("sectionRef") if isinstance(p, dict) else None
                 page_ref = p.get("pageRef") if isinstance(p, dict) else None
-                ref_bits = [r for r in (section_ref, page_ref) if r]
+                ref_bits = [r for r in (doc_ref, section_ref, page_ref) if r]
                 ref_str = f" _({', '.join(ref_bits)})_" if ref_bits else ""
                 lines.append(f"- **{i}.{j}** {point_text}{ref_str}")
             lines.append("")
@@ -141,8 +149,9 @@ def build_markdown_report(analysis: dict, source_label: str) -> str:
         for it in items:
             reason = (it.get("reason", "") or "").replace("|", "/")
             evidence = (it.get("evidence") or "Not cited in RFP").replace("|", "/")
-            if it.get("pageRef"):
-                evidence += f" ({it['pageRef']})"
+            cite_bits = [r for r in (it.get("docRef"), it.get("pageRef")) if r]
+            if cite_bits:
+                evidence += f" ({', '.join(cite_bits)})"
             lines.append(f"| {it.get('item','')} | {it.get('status','')} | {reason} | {evidence} |")
         lines.append("")
     lines.append("---")
@@ -155,8 +164,7 @@ def build_markdown_report(analysis: dict, source_label: str) -> str:
 # ---------------------------------------------------------------------------
 with st.sidebar:
     st.header("\U0001F511 Connection")
-    
-    env_key = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
+    env_key = os.environ.get("GEMINI_API_KEY", "")
     api_key = st.text_input(
         "Gemini API key", value=env_key, type="password",
         help="Get a free key at aistudio.google.com. Loaded from .env if set there.",
@@ -194,59 +202,71 @@ st.caption("AI-powered Go/No-Go decision support for Request for Proposal docume
 
 col_upload, col_sample = st.columns([3, 1])
 with col_upload:
-    uploaded_file = st.file_uploader("Upload an RFP (PDF)", type=["pdf"])
+    uploaded_files = st.file_uploader(
+        "Upload this RFP's documents (PDF) — main RFP + any Exhibits/Attachments, "
+        "select all of them together",
+        type=["pdf"], accept_multiple_files=True,
+    )
 with col_sample:
     st.write("")
     st.write("")
     use_sample = st.button("Load sample RFP", use_container_width=True)
 
-rfp_text = None
-source_label = None
+if uploaded_files:
+    st.caption(
+        f"{len(uploaded_files)} document(s) selected — they'll be combined and analyzed "
+        "as ONE RFP: " + ", ".join(f.name for f in uploaded_files)
+    )
 
+# Extract + combine whichever source is active this run. Re-extracting on
+# every rerun is cheap (no AI call involved) — only analyze_rfp() itself is
+# gated behind the button below.
+pending_text = None
+pending_label = None
+pending_docs = []
 if use_sample:
     sample_path = os.path.join(os.path.dirname(__file__), "sample_rfp.pdf")
     try:
-        rfp_text = extract_text_from_pdf(sample_path)
-        source_label = "sample_rfp.pdf"
-        st.session_state["_pending_text"] = rfp_text
-        st.session_state["_pending_source"] = source_label
+        pending_text = extract_text_from_pdf(sample_path)
+        pending_label = "sample_rfp.pdf"
+        pending_docs = ["sample_rfp.pdf"]
     except PDFExtractionError as e:
         st.error(str(e))
-elif uploaded_file is not None:
+elif uploaded_files:
     try:
-        rfp_text = extract_text_from_pdf(uploaded_file)
-        source_label = uploaded_file.name
-        st.session_state["_pending_text"] = rfp_text
-        st.session_state["_pending_source"] = source_label
+        pending_text, pending_docs = extract_text_from_documents(uploaded_files)
+        pending_label = pending_docs[0] if len(pending_docs) == 1 else ", ".join(pending_docs)
     except PDFExtractionError as e:
         st.error(str(e))
-
-pending_text = st.session_state.get("_pending_text")
-pending_source = st.session_state.get("_pending_source")
 
 if pending_text:
-    st.success(f"Loaded: **{pending_source}** ({len(pending_text):,} characters extracted)")
-    analyze_clicked = st.button("\U0001F50D Analyze RFP", type="primary")
+    already_done = pending_docs == st.session_state.source_docs and st.session_state.analysis is not None
+    if not already_done:
+        st.success(f"Ready to analyze: **{pending_label}** ({len(pending_text):,} characters extracted)")
+        analyze_clicked = st.button("\U0001F50D Analyze RFP", type="primary")
 
-    if analyze_clicked:
-        if not api_key:
-            st.error("No Gemini API key set. Add one in the sidebar first.")
-        else:
-            with st.spinner("Analyzing against the checklist and company profile..."):
-                try:
-                    result = analyze_rfp(pending_text, profile, api_key)
-                    st.session_state.analysis = result
-                    st.session_state.source_label = pending_source
-                    st.success("Analysis complete.")
-                except QuotaExhaustedError as e:
-                    st.error(f"Daily quota exhausted: {e}")
-                except AnalysisError as e:
-                    st.error(f"Analysis failed: {e}")
+        if analyze_clicked:
+            if not api_key:
+                st.error("No Gemini API key set. Add one in the sidebar first.")
+            else:
+                with st.spinner(f"Analyzing {len(pending_docs)} document(s) as one RFP..."):
+                    try:
+                        result = analyze_rfp(pending_text, profile, api_key, doc_names=pending_docs)
+                        st.session_state.analysis = result
+                        st.session_state.source_label = pending_label
+                        st.session_state.source_docs = pending_docs
+                        st.success("Analysis complete.")
+                    except QuotaExhaustedError as e:
+                        st.error(f"Daily quota exhausted: {e}")
+                    except AnalysisError as e:
+                        st.error(f"Analysis failed: {e}")
+
+analysis = st.session_state.analysis
+source_label = st.session_state.source_label
 
 # ---------------------------------------------------------------------------
 # Results
 # ---------------------------------------------------------------------------
-analysis = st.session_state.analysis
 if analysis:
     v = analysis.get("verdict", {}) or {}
     deliverables = analysis.get("deliverables", []) or []
@@ -256,6 +276,10 @@ if analysis:
     total_days = sum(d.get("estimatedDays") or 0 for d in deliverables)
 
     st.divider()
+
+    rfp_identifier = analysis.get("rfpIdentifier")
+    if rfp_identifier:
+        st.markdown(f"#### \U0001F4CB {rfp_identifier}")
 
     tag = v.get("tag", "—")
     score = v.get("score", "—")
@@ -336,9 +360,10 @@ if analysis:
             points = d.get("points", []) or []
             for j, p in enumerate(points, start=1):
                 point_text = p.get("point", "") if isinstance(p, dict) else str(p)
+                doc_ref = p.get("docRef") if isinstance(p, dict) else None
                 section_ref = p.get("sectionRef") if isinstance(p, dict) else None
                 page_ref = p.get("pageRef") if isinstance(p, dict) else None
-                ref_bits = [r for r in (section_ref, page_ref) if r]
+                ref_bits = [r for r in (doc_ref, section_ref, page_ref) if r]
                 ref_str = f" <span style='color:#888; font-size:11px; font-style:italic;'>({', '.join(ref_bits)})</span>" if ref_bits else ""
                 st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;**{i}.{j}** {point_text}{ref_str}", unsafe_allow_html=True)
             st.markdown("")
@@ -390,9 +415,9 @@ if analysis:
                     status = it.get("status", "REVIEW")
                     color = STATUS_COLOR.get(status, "#8881a3")
                     evidence = it.get("evidence") or "<span style='color:#888;'>Not cited in RFP</span>"
-                    page_ref = it.get("pageRef")
-                    if page_ref:
-                        evidence += f" <span style='color:#666; font-style:italic;'>({page_ref})</span>"
+                    cite_bits = [r for r in (it.get("docRef"), it.get("pageRef")) if r]
+                    if cite_bits:
+                        evidence += f" <span style='color:#666; font-style:italic;'>({', '.join(cite_bits)})</span>"
                     rows_html += f"""
                     <tr style="border-bottom:1px solid #333;">
                         <td style="padding:8px; vertical-align:top; font-weight:600; width:18%;">{it.get('item','')}</td>
@@ -460,16 +485,26 @@ if analysis:
                 st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;{child.get('number','')} {child.get('title','')}", unsafe_allow_html=True)
 
     st.divider()
+    rfp_identifier = analysis.get("rfpIdentifier")
+    if rfp_identifier:
+        filename_base = rfp_identifier
+    else:
+        # Fallback for the rare case the AI couldn't find any number/title in the text.
+        docs = st.session_state.source_docs or [source_label or "RFP"]
+        filename_base = docs[0].rsplit(".", 1)[0] if docs else "RFP"
+        if len(docs) > 1:
+            filename_base += f"_plus{len(docs) - 1}docs"
+    safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in filename_base).strip("_") or "RFP"
     dl1, dl2 = st.columns(2)
-    md_report = build_markdown_report(analysis, st.session_state.source_label or "RFP")
+    md_report = build_markdown_report(analysis, source_label or "RFP")
     dl1.download_button(
         "\u2b07\ufe0f Download Markdown report", data=md_report,
-        file_name="rfp_analysis_report.md", mime="text/markdown", use_container_width=True,
+        file_name=f"{safe_name}_analysis_report.md", mime="text/markdown", use_container_width=True,
     )
-    pdf_bytes = generate_pdf_report(analysis, st.session_state.source_label or "RFP")
+    pdf_bytes = generate_pdf_report(analysis, source_label or "RFP")
     dl2.download_button(
         "\u2b07\ufe0f Download PDF report", data=pdf_bytes,
-        file_name="rfp_analysis_report.pdf", mime="application/pdf", use_container_width=True,
+        file_name=f"{safe_name}_analysis_report.pdf", mime="application/pdf", use_container_width=True,
     )
 else:
-    st.caption("Upload an RFP or load the sample, then click Analyze RFP.")
+    st.caption("Upload this RFP's document(s) — main RFP plus any Exhibits/Attachments — (or load the sample), then click Analyze.")

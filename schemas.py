@@ -21,8 +21,11 @@ _ITEM_COUNT = len(CHECKLIST_ITEMS)
 
 class DeliverablePoint(BaseModel):
     """A single child requirement/description item under a parent deliverable,
-    traceable back to where in the RFP it came from."""
+    traceable back to where in the RFP it came from — including which source
+    document, when the RFP was uploaded as multiple files (main RFP +
+    exhibits/attachments)."""
     point: str
+    docRef: Optional[str] = None      # e.g. "RFP_Exhibit_A.pdf"
     sectionRef: Optional[str] = None  # e.g. "Section 4.2 - Insurance Requirements"
     pageRef: Optional[str] = None     # e.g. "Page 3"
 
@@ -49,6 +52,7 @@ class ComplianceItem(BaseModel):
     status: Literal["GO", "NO-GO", "REVIEW"]
     reason: str
     evidence: Optional[str] = None
+    docRef: Optional[str] = None  # e.g. "RFP_Exhibit_B.pdf"
     pageRef: Optional[str] = None
 
 
@@ -96,6 +100,9 @@ class RFPCoreAnalysis(BaseModel):
     smaller call so it isn't competing with the 34-item checklist for the
     model's attention/output budget."""
     verdict: VerdictComponents
+    rfpIdentifier: Optional[str] = None  # e.g. "26-CMS-114-IAM" or a short title — used for
+                                          # display and as the basis for the downloaded report's
+                                          # filename, instead of just the first uploaded filename.
     deliverables: List[Deliverable] = Field(default_factory=list)
     evaluationCriteria: List[Criterion] = Field(default_factory=list)
     keyDatesBudget: KeyDatesBudget = Field(default_factory=KeyDatesBudget)
@@ -131,6 +138,7 @@ def build_category_checklist_schema(count: int):
 # already expects.
 class RFPAnalysis(BaseModel):
     verdict: VerdictComponents
+    rfpIdentifier: Optional[str] = None
     deliverables: List[Deliverable] = Field(default_factory=list)
     evaluationCriteria: List[Criterion] = Field(default_factory=list)
     compliance: List[ComplianceItem] = Field(default_factory=list)

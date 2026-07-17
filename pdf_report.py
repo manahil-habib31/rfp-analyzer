@@ -89,6 +89,13 @@ def generate_pdf_report(analysis: dict, source_label: str) -> bytes:
     tone = TONE_COLORS.get(tag, colors.grey)
 
     story.append(Paragraph("RFP Analysis Report", ss["RFPTitle"]))
+    rfp_identifier = analysis.get("rfpIdentifier")
+    if rfp_identifier:
+        story.append(Paragraph(
+            rfp_identifier,
+            ParagraphStyle(name="RFPIdentifier", parent=ss["Normal"], fontSize=11, fontName="Helvetica-Bold",
+                            textColor=colors.HexColor("#333333"), spaceAfter=2),
+        ))
     story.append(Paragraph(f"Source: {source_label}", ss["RFPMeta"]))
 
     score_cell = [
@@ -211,9 +218,10 @@ def generate_pdf_report(analysis: dict, source_label: str) -> bytes:
             points = d.get("points", []) or []
             for j, p in enumerate(points, start=1):
                 point_text = p.get("point", "") if isinstance(p, dict) else str(p)
+                doc_ref = p.get("docRef") if isinstance(p, dict) else None
                 section_ref = p.get("sectionRef") if isinstance(p, dict) else None
                 page_ref = p.get("pageRef") if isinstance(p, dict) else None
-                ref_bits = [r for r in (section_ref, page_ref) if r]
+                ref_bits = [r for r in (doc_ref, section_ref, page_ref) if r]
                 ref_str = f' <font color="#999999"><i>({", ".join(ref_bits)})</i></font>' if ref_bits else ""
                 story.append(Paragraph(f"<b>{i}.{j}</b> {point_text}{ref_str}", deliv_child_style))
 
@@ -290,8 +298,9 @@ def generate_pdf_report(analysis: dict, source_label: str) -> bytes:
             status = it.get("status", "REVIEW")
             status_hex = STATUS_HEX.get(status, "#6b7280")
             evidence = it.get("evidence") or '<font color="#999999">Not cited in RFP</font>'
-            if it.get("pageRef"):
-                evidence = f"{evidence} <font color=\"#999999\"><i>({it['pageRef']})</i></font>"
+            cite_bits = [r for r in (it.get("docRef"), it.get("pageRef")) if r]
+            if cite_bits:
+                evidence = f"{evidence} <font color=\"#999999\"><i>({', '.join(cite_bits)})</i></font>"
             rows.append([
                 Paragraph(f"<b>{it.get('item','')}</b>", ss["RFPCell"]),
                 Paragraph(f'<font color="{status_hex}"><b>{status}</b></font>', ss["RFPCell"]),

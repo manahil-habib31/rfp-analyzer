@@ -45,16 +45,32 @@ class AnalysisError(Exception):
     pass
 
 
-def _build_core_system_prompt(company_profile: dict) -> str:
+def _build_core_system_prompt(company_profile: dict, doc_names: list = None) -> str:
     profile_lines = "\n".join(f"- {k}: {v}" for k, v in company_profile.items())
+    doc_note = ""
+    if doc_names and len(doc_names) > 1:
+        doc_list = "\n".join(f"  - {d}" for d in doc_names)
+        doc_note = f"""
+This RFP was assembled from {len(doc_names)} separate source documents:
+{doc_list}
+The text below is prefixed throughout with "--- Document: <filename>, Page N ---" headers
+marking which document and page each section came from. Track these headers as you read,
+and use them to fill in "docRef" (and "pageRef") accurately for every deliverable point —
+do not leave docRef null just because you didn't note which document a point came from.
+"""
     return f"""You are an RFP capture assistant. You read an incoming RFP and produce a high-level
 qualification assessment for a Proposal Capture Manager, weighing it against the company's
 profile below.
-
+{doc_note}
 COMPANY PROFILE (use this to judge fit, not generic assumptions):
 {profile_lines}
 
 Produce:
+- "rfpIdentifier": the RFP's official solicitation/bid number if the document states one
+  (e.g. "RFP No. 26-CMS-114-IAM", "IFB BPM057272", "Solicitation #2026-114") — give just the
+  number/code itself, not the full sentence. If no number is stated, give a short 4-8 word
+  title instead (e.g. "PingOne Advanced Identity Subscription"). Set to null only if you
+  genuinely can't identify either from the text.
 - A "verdict" with THREE separate sub-scores (each 0-100) plus a narrative summary — do NOT
   produce one single overall score; that gets computed afterward from these components plus
   the compliance checklist, so a person can see exactly what's driving the result:
@@ -83,11 +99,16 @@ Produce:
       belong under this deliverable, grounded in the RFP text. Each point has:
         - "point": the requirement/description itself (e.g. "Certificate of insurance
           required", "Coverage of at least $5,000,000").
+        - "docRef": which source document this came from — the RFP text below is marked
+          with "--- Document: <filename>, Page N ---" headers whenever more than one
+          document was supplied (e.g. the main RFP plus Exhibit A/B/C); cite the exact
+          filename shown in that header (e.g. "RFP_Exhibit_A.pdf"). Set to null if the
+          text has no such document markers (a single-document RFP) or you can't tell.
         - "sectionRef": the RFP section/clause this came from, if named or numbered in
           the text (e.g. "Section 4.2", "Attachment C"). Set to null if the RFP doesn't
           label sections or you can't tell.
-        - "pageRef": the page number, if you can tell — the RFP text below is marked with
-          "--- Page N ---" headers; cite the page the relevant text appeared under (e.g.
+        - "pageRef": the page number, if you can tell — cite the page number shown in the
+          "--- Document: ..., Page N ---" header the relevant text appeared under (e.g.
           "Page 3"). Set to null rather than guessing if you can't tell.
       Every deliverable must have at least one point.
 - "evaluationCriteria": [{{"criterion", "weightPercent"}}], ordered by weight descending.
@@ -102,7 +123,7 @@ Produce:
 Respond with ONLY a raw JSON object (no commentary, no markdown fences)."""
 
 
-def _build_compliance_system_prompt(company_profile: dict, category: str) -> str:
+def _build_compliance_system_prompt(company_profile: dict, category: str, doc_names: list = None) -> str:
     cat_items = [it for it in CHECKLIST_ITEMS if it["category"] == category]
     item_list = "\n".join(
         f"{i+1}. {it['item']} — {it['question']}"
@@ -110,11 +131,22 @@ def _build_compliance_system_prompt(company_profile: dict, category: str) -> str
     )
     profile_lines = "\n".join(f"- {k}: {v}" for k, v in company_profile.items())
     cat_title = CATEGORY_META[category]["title"]
+    doc_note = ""
+    if doc_names and len(doc_names) > 1:
+        doc_list = "\n".join(f"  - {d}" for d in doc_names)
+        doc_note = f"""
+This RFP was assembled from {len(doc_names)} separate source documents:
+{doc_list}
+The text below is prefixed throughout with "--- Document: <filename>, Page N ---" headers
+marking which document and page each section came from. Track these headers as you read,
+and use them to fill in "docRef" (and "pageRef") accurately for every checklist item's
+evidence — do not leave docRef null just because you didn't note which document it came from.
+"""
 
     return f"""You are an RFP compliance assistant. Your ONLY job is to answer a fixed checklist
 of {len(cat_items)} {cat_title} items against the RFP text below — nothing else. This is the
 entire task; do not summarize the RFP, do not skip items, do not stop early.
-
+{doc_note}
 COMPANY PROFILE (use this to judge fit, not generic assumptions):
 {profile_lines}
 
@@ -133,9 +165,14 @@ For EACH item, decide:
   item at all, say so plainly (e.g. "Not addressed in the RFP") rather than leaving it out.
 - "evidence": a short direct quote or close paraphrase from the RFP. If the RFP genuinely
   doesn't address the item, set evidence to null.
-- "pageRef": the page number the evidence came from, if you can tell — the RFP text below
-  is marked with "--- Page N ---" headers; cite the page the relevant text appeared under
-  (e.g. "Page 3"). If you can't tell, set pageRef to null rather than guessing.
+- "docRef": which source document the evidence came from — the RFP text below is marked
+  with "--- Document: <filename>, Page N ---" headers whenever more than one document was
+  supplied (e.g. the main RFP plus Exhibit A/B/C); cite the exact filename shown in that
+  header (e.g. "RFP_Exhibit_A.pdf"). Set to null if the text has no such document markers
+  (a single-document RFP) or you can't tell.
+- "pageRef": the page number the evidence came from, if you can tell — cite the page
+  number shown in the "--- Document: ..., Page N ---" header the relevant text appeared
+  under (e.g. "Page 3"). If you can't tell, set pageRef to null rather than guessing.
 
 It is critical that your response contains all {len(cat_items)} items — a response with
 fewer items is invalid."""
@@ -164,7 +201,14 @@ def _call_gemini_with_retry(client, system_prompt: str, rfp_text: str, response_
         try:
             response = client.models.generate_content(
                 model=MODEL_NAME,
-                contents=[{"role": "user", "parts": [{"text": "RFP TEXT:\n\n" + rfp_text[:16000]}]}],
+                # 120,000 chars (~30k tokens) comfortably fits a main RFP plus several
+                # exhibit/attachment documents combined — Gemini 2.5 Flash supports up
+                # to a 1M-token context, so this is still a conservative safety cap, not
+                # a tight one. The old 16,000-char limit was fine for a single RFP but
+                # was silently cutting off later documents (and their "--- Document:
+                # X, Page N ---" markers) once multiple files were combined, which is
+                # why docRef was never showing up for multi-document RFPs.
+                contents=[{"role": "user", "parts": [{"text": "RFP TEXT:\n\n" + rfp_text[:120000]}]}],
                 config=types.GenerateContentConfig(
                     system_instruction=system_prompt,
                     response_mime_type="application/json",
@@ -279,7 +323,7 @@ def generate_proposal_outline(rfp_text: str, company_profile: dict, api_key: str
         raise AnalysisError("No Gemini API key configured.")
     client = genai.Client(api_key=api_key)
     prompt = _build_outline_prompt(company_profile)
-    result = _call_gemini_with_retry(client, prompt, rfp_text, ProposalOutline, max_output_tokens=2048)
+    result = _call_gemini_with_retry(client, prompt, rfp_text, ProposalOutline, max_output_tokens=4096)
     if isinstance(result, ProposalOutline):
         outline = result.model_dump()
     else:
@@ -287,7 +331,7 @@ def generate_proposal_outline(rfp_text: str, company_profile: dict, api_key: str
     return _apply_outline_numbering(outline)
 
 
-def analyze_rfp(rfp_text: str, company_profile: dict, api_key: str) -> dict:
+def analyze_rfp(rfp_text: str, company_profile: dict, api_key: str, doc_names: list = None) -> dict:
     """
     Runs the full analysis as multiple Gemini calls:
       1. Core analysis (verdict, deliverables, criteria, dates/budget, risks, strengths).
@@ -304,6 +348,11 @@ def analyze_rfp(rfp_text: str, company_profile: dict, api_key: str) -> dict:
     Results are merged back onto the fixed checklist (so the report always
     covers exactly the right items regardless of ordering) and the
     deterministic hard-rule overrides are applied on top.
+
+    doc_names: list of source document filenames when the RFP was assembled
+    from multiple files (main RFP + exhibits/attachments) — passed through to
+    the prompts so the model can reliably cite which document a deliverable
+    point or checklist item's evidence came from (docRef).
     """
     if not api_key:
         raise AnalysisError("No Gemini API key configured.")
@@ -311,8 +360,8 @@ def analyze_rfp(rfp_text: str, company_profile: dict, api_key: str) -> dict:
     client = genai.Client(api_key=api_key)
 
     # --- Call 1: core analysis ---
-    core_prompt = _build_core_system_prompt(company_profile)
-    core_result = _call_gemini_with_retry(client, core_prompt, rfp_text, RFPCoreAnalysis, max_output_tokens=4096)
+    core_prompt = _build_core_system_prompt(company_profile, doc_names)
+    core_result = _call_gemini_with_retry(client, core_prompt, rfp_text, RFPCoreAnalysis, max_output_tokens=16384)
     if isinstance(core_result, RFPCoreAnalysis):
         data = core_result.model_dump()
     else:
@@ -326,9 +375,9 @@ def analyze_rfp(rfp_text: str, company_profile: dict, api_key: str) -> dict:
         if cat_count == 0:
             continue
         try:
-            prompt = _build_compliance_system_prompt(company_profile, category)
+            prompt = _build_compliance_system_prompt(company_profile, category, doc_names)
             schema = build_category_checklist_schema(cat_count)
-            result = _call_gemini_with_retry(client, prompt, rfp_text, schema, max_output_tokens=4096)
+            result = _call_gemini_with_retry(client, prompt, rfp_text, schema, max_output_tokens=8192)
             if hasattr(result, "model_dump"):
                 all_raw_items.extend(result.model_dump()["items"])
             else:
@@ -385,6 +434,7 @@ def _merge_compliance(ai_items: list) -> list:
             "status": (found or {}).get("status", "REVIEW"),
             "reason": (found or {}).get("reason", "Not returned by the model — re-run the analysis or check this item manually."),
             "evidence": (found or {}).get("evidence"),
+            "docRef": (found or {}).get("docRef"),
             "pageRef": (found or {}).get("pageRef"),
         })
     return merged
