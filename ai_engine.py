@@ -196,6 +196,7 @@ def _call_gemini_with_retry(client, system_prompt: str, rfp_text: str, response_
     Raises QuotaExhaustedError or AnalysisError."""
     backoff = INITIAL_BACKOFF_SECONDS
     last_error = None
+    current_max_tokens = max_output_tokens
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
@@ -213,16 +214,36 @@ def _call_gemini_with_retry(client, system_prompt: str, rfp_text: str, response_
                     system_instruction=system_prompt,
                     response_mime_type="application/json",
                     response_schema=response_schema,
-                    max_output_tokens=max_output_tokens,
+                    max_output_tokens=current_max_tokens,
                     thinking_config=types.ThinkingConfig(thinking_budget=0),
                     temperature=0.1,
                 ),
             )
+
+            finish_reason = ""
+            candidates = getattr(response, "candidates", None) or []
+            if candidates:
+                finish_reason = str(getattr(candidates[0], "finish_reason", "") or "")
+
             if getattr(response, "parsed", None) is not None:
                 return response.parsed
+
+            # The model can stop early because it genuinely ran out of output
+            # budget (MAX_TOKENS) even when max_output_tokens looks generous —
+            # this happens occasionally with schema-constrained generation on
+            # certain inputs, independent of the plain 429/500 errors handled
+            # below. Retrying with a bigger budget (no backoff needed — this
+            # isn't a rate limit) usually resolves it.
+            if "MAX_TOKENS" in finish_reason:
+                last_error = AnalysisError(
+                    f"Response was truncated (MAX_TOKENS) at max_output_tokens={current_max_tokens}."
+                )
+                current_max_tokens = min(current_max_tokens * 2, 32768)
+                continue
+
             text = (response.text or "").strip()
             if not text:
-                raise AnalysisError("Gemini returned an empty response.")
+                raise AnalysisError(f"Gemini returned an empty response (finish_reason={finish_reason or 'unknown'}).")
             return text
 
         except errors.ClientError as e:
