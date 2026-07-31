@@ -50,6 +50,12 @@ class Criterion(BaseModel):
 class ComplianceItem(BaseModel):
     item: str
     status: Literal["GO", "NO-GO", "REVIEW"]
+    # Only meaningful when status == "REVIEW" — a finer-grained reason WHY it
+    # needs review, matching the team plan's 4-state Gap Analysis model
+    # (Fully Matched=GO, Not Available=NO-GO, and REVIEW split into these
+    # two). Additive only — the core GO/NO-GO/REVIEW status (and every hard
+    # rule / score that depends on it) is unchanged.
+    gapType: Optional[Literal["Partially Matched", "Requires Clarification"]] = None
     reason: str
     evidence: Optional[str] = None
     docRef: Optional[str] = None  # e.g. "RFP_Exhibit_B.pdf"
@@ -95,6 +101,17 @@ class VerdictComponents(BaseModel):
     summary: str
 
 
+class ExtractedQuestion(BaseModel):
+    """A direct question the RFP poses to the vendor (e.g. 'Describe your
+    company's security approach') — distinct from the fixed 35-item
+    compliance checklist, since these vary RFP to RFP. This is what the
+    upcoming AI Response Generation module answers."""
+    question: str
+    docRef: Optional[str] = None
+    sectionRef: Optional[str] = None
+    pageRef: Optional[str] = None
+
+
 class RFPCoreAnalysis(BaseModel):
     """Everything except the compliance checklist — asked for in its own,
     smaller call so it isn't competing with the 34-item checklist for the
@@ -108,6 +125,7 @@ class RFPCoreAnalysis(BaseModel):
     keyDatesBudget: KeyDatesBudget = Field(default_factory=KeyDatesBudget)
     risks: List[Risk] = Field(default_factory=list)
     strengths: List[Strength] = Field(default_factory=list)
+    questions: List[ExtractedQuestion] = Field(default_factory=list)
 
 
 class ComplianceChecklist(BaseModel):
@@ -145,6 +163,7 @@ class RFPAnalysis(BaseModel):
     keyDatesBudget: KeyDatesBudget = Field(default_factory=KeyDatesBudget)
     risks: List[Risk] = Field(default_factory=list)
     strengths: List[Strength] = Field(default_factory=list)
+    questions: List[ExtractedQuestion] = Field(default_factory=list)
 
 
 # --- Proposal Outline (Stage 3: Proposal Planning) ---
@@ -165,3 +184,17 @@ class OutlineSection(BaseModel):
 
 class ProposalOutline(BaseModel):
     sections: List[OutlineSection] = Field(min_length=1)
+
+
+# --- AI Response Generation (Phase 6: answers to the questions extracted
+# in Phase 2.15), grounded in the company knowledge base rather than the
+# model's own guesses. ---
+class GeneratedResponse(BaseModel):
+    question: str
+    response: str  # a professional, proposal-ready paragraph answering the question
+    basedOn: Optional[str] = None  # which knowledge base section(s) grounded this answer,
+                                    # e.g. "project_portfolio, security_compliance"
+
+
+class ResponseGenerationResult(BaseModel):
+    responses: List[GeneratedResponse] = Field(default_factory=list)

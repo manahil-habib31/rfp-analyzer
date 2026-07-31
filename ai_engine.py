@@ -1,42 +1,49 @@
 """
 ai_engine.py
 
-Sends the RFP text + company profile to Gemini and gets back a strict JSON
+Sends the RFP text + company profile to OpenAI and gets back a strict JSON
 analysis: verdict, deliverables, evaluation criteria, a checklist-item-by-item
 compliance breakdown, key dates/budget, and a risk assessment.
 
 Design notes (matching the pattern used elsewhere in SPS's internship
 projects):
-- Structured JSON output (response_mime_type + response_schema) rather than
-  free-text parsing, so scores/counts/badges are computed, not guessed.
-- Retry with exponential backoff on transient errors (429 rate limit, 500/503
-  server errors). Daily quota exhaustion is detected separately from a plain
-  rate limit and fails fast with a clear message, since retrying a daily cap
-  wastes time.
+- Structured JSON output (OpenAI's "structured outputs" via the
+  `beta.chat.completions.parse` helper + a Pydantic response_format) rather
+  than free-text parsing, so scores/counts/badges are computed, not guessed.
+- Retry with exponential backoff on transient errors (429 rate limit, 5xx
+  server errors). Billing/quota exhaustion is detected separately from a
+  plain rate limit and fails fast with a clear message, since retrying a
+  quota cap wastes time.
 
-Uses the current `google-genai` SDK (the older `google-generativeai` package
-used in some reference projects is deprecated and no longer receives updates).
+Uses the official `openai` Python SDK (>=1.40, for structured-outputs
+support via `.parse()`).
 """
 
 import json
 import os
 import time
 
-from google import genai
-from google.genai import types, errors
+import openai
+from openai import OpenAI
 
 from checklist_items import CHECKLIST_ITEMS, CATEGORY_ORDER, CATEGORY_META
-from schemas import RFPAnalysis, RFPCoreAnalysis, ComplianceChecklist, build_category_checklist_schema, ProposalOutline
+from schemas import RFPAnalysis, RFPCoreAnalysis, ComplianceChecklist, build_category_checklist_schema, ProposalOutline, ResponseGenerationResult
+from knowledge_base import get_full_knowledge_base
 from decision_rules import apply_hard_rules
 from scoring import compute_scores, compute_deliverable_totals, compute_final_verdict
 
-MODEL_NAME = "gemini-2.5-flash"
+# Routed through OpenRouter (https://openrouter.ai), which proxies to OpenAI
+# (and many other providers) behind an OpenAI-compatible API — model names
+# there are prefixed with the provider, e.g. "openai/gpt-4o-mini".
+MODEL_NAME = "openai/gpt-4o-mini"
 MAX_RETRIES = 4
 INITIAL_BACKOFF_SECONDS = 2
 
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
 
 class QuotaExhaustedError(Exception):
-    """Raised when Gemini's daily free-tier quota is used up. Not retryable."""
+    """Raised when OpenAI's billing/rate quota is used up. Not retryable."""
     pass
 
 
@@ -119,6 +126,19 @@ Produce:
   covering the most significant reasons to hesitate on this bid.
 - "strengths": 3-6 entries, each {{"point", "note"}}, covering the most significant reasons
   TO pursue this bid — favorable terms, strong capability alignment, relationship value, etc.
+- "questions": every DIRECT question the RFP poses to the vendor — distinct from the fixed
+  compliance checklist, since these vary RFP to RFP. Look for phrasing like "Describe your...",
+  "Explain your...", "Provide details on...", "How does your company...". Examples: "Describe
+  your company's experience with similar projects", "Explain your security approach", "Provide
+  pricing information", "Explain your development methodology". Do NOT include the fixed
+  checklist-style requirements (those are handled separately) — only genuine open-ended
+  questions the vendor must answer in prose. Extract every one found, however many that is;
+  do not stop after 3-4. Each has:
+    - "question": the question itself, as close to verbatim as reasonable.
+    - "docRef": which source document this came from (see the document-marker note above).
+      Set to null for a single-document RFP or if you can't tell.
+    - "sectionRef": the RFP section/clause this came from, if labeled. Set to null if not.
+    - "pageRef": the page number, if you can tell. Set to null rather than guessing.
 
 Respond with ONLY a raw JSON object (no commentary, no markdown fences)."""
 
@@ -158,6 +178,15 @@ For EACH item, decide:
 - "status": "GO" (requirement is satisfied or favorable given the company profile),
   "NO-GO" (requirement is not satisfied, or a hard threshold is exceeded), or
   "REVIEW" (needs a human judgment call, or the RFP doesn't provide enough detail).
+- "gapType": ONLY set this when status is "REVIEW" (leave it null for GO and NO-GO). Choose:
+    - "Partially Matched" — the RFP DOES address this item, and the company's profile
+      partially meets it, but not clearly enough to call it a firm GO (e.g. the RFP asks
+      for a specific certification and the company has a related-but-not-identical one).
+    - "Requires Clarification" — the RFP is SILENT or too vague about this item to judge
+      it at all (e.g. no mention of insurance requirements anywhere in the text).
+  This distinction matters: "Partially Matched" means the proposal team has something to
+  work with; "Requires Clarification" means they likely need to ask the client a question
+  before responding.
 - Hard rule for "Payment Terms": NET30 or better -> GO. Worse than NET30 -> NO-GO.
 - Hard rule for "Insurance Requirements": required coverage <= the company's
   max_insurance_available_usd -> GO. Above it -> NO-GO.
@@ -178,21 +207,33 @@ It is critical that your response contains all {len(cat_items)} items — a resp
 fewer items is invalid."""
 
 
-def _is_daily_quota_error(err: errors.APIError) -> bool:
-    # The "per day" indicator lives inside the nested quotaId (e.g.
-    # "GenerateRequestsPerDayPerProjectPerModel-FreeTier"), not in the short
-    # .message field — checking .message alone (as a prior version of this
-    # function did) misses it entirely, since Gemini's top-level message text
-    # for this error never actually says "day". Check the full details too.
-    full_text = f"{getattr(err, 'message', '')} {getattr(err, 'details', '')}".lower()
-    return "quota" in full_text and ("perday" in full_text or "per day" in full_text or "daily" in full_text)
+def _is_quota_exhausted_error(err) -> bool:
+    # Both a plain 429 rate limit AND an out-of-credits condition can surface
+    # as openai.RateLimitError through OpenRouter, so check the JSON body's
+    # error code/type/message rather than trusting the status code alone —
+    # OpenRouter's out-of-credits response usually carries "insufficient"
+    # somewhere in code/type/message.
+    body = getattr(err, "body", None) or {}
+    err_info = body.get("error", {}) if isinstance(body, dict) else {}
+    code = str(err_info.get("code") or "").lower()
+    err_type = str(err_info.get("type") or "").lower()
+    message = str(getattr(err, "message", "") or err_info.get("message") or "").lower()
+    return (
+        "insufficient_quota" in code
+        or "insufficient_quota" in err_type
+        or "insufficient" in message
+        or "exceeded your current quota" in message
+        or "out of credit" in message
+    )
 
 
-def _call_gemini_with_retry(client, system_prompt: str, rfp_text: str, response_schema, max_output_tokens: int = 8192):
-    """Generic Gemini caller with retry/backoff, reused for both the core
-    analysis call and the dedicated compliance call. Returns the parsed
-    object (typed per response_schema) or, if schema validation didn't
-    populate .parsed, the raw response text as a fallback.
+def _call_openai_with_retry(client, system_prompt: str, rfp_text: str, response_schema, max_output_tokens: int = 8192):
+    """Generic OpenAI caller with retry/backoff, reused for the core analysis
+    call, the per-department compliance calls, the outline call, and the
+    response-generation call. Returns the parsed object (typed per
+    response_schema, via OpenAI's structured-outputs `.parse()` helper) or,
+    if structured parsing didn't populate a result, the raw response text as
+    a fallback.
     Raises QuotaExhaustedError or AnalysisError."""
     backoff = INITIAL_BACKOFF_SECONDS
     last_error = None
@@ -200,77 +241,100 @@ def _call_gemini_with_retry(client, system_prompt: str, rfp_text: str, response_
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            response = client.models.generate_content(
+            response = client.beta.chat.completions.parse(
                 model=MODEL_NAME,
-                # 120,000 chars (~30k tokens) comfortably fits a main RFP plus several
-                # exhibit/attachment documents combined — Gemini 2.5 Flash supports up
-                # to a 1M-token context, so this is still a conservative safety cap, not
-                # a tight one. The old 16,000-char limit was fine for a single RFP but
-                # was silently cutting off later documents (and their "--- Document:
-                # X, Page N ---" markers) once multiple files were combined, which is
-                # why docRef was never showing up for multi-document RFPs.
-                contents=[{"role": "user", "parts": [{"text": "RFP TEXT:\n\n" + rfp_text[:120000]}]}],
-                config=types.GenerateContentConfig(
-                    system_instruction=system_prompt,
-                    response_mime_type="application/json",
-                    response_schema=response_schema,
-                    max_output_tokens=current_max_tokens,
-                    thinking_config=types.ThinkingConfig(thinking_budget=0),
-                    temperature=0.1,
-                ),
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    # 120,000 chars (~30k tokens) comfortably fits a main RFP plus several
+                    # exhibit/attachment documents combined. The old 16,000-char limit was
+                    # fine for a single RFP but was silently cutting off later documents
+                    # (and their "--- Document: X, Page N ---" markers) once multiple files
+                    # were combined, which is why docRef was never showing up for
+                    # multi-document RFPs.
+                    {"role": "user", "content": "RFP TEXT:\n\n" + rfp_text[:120000]},
+                ],
+                response_format=response_schema,
+                max_tokens=current_max_tokens,
+                temperature=0.1,
             )
 
-            finish_reason = ""
-            candidates = getattr(response, "candidates", None) or []
-            if candidates:
-                finish_reason = str(getattr(candidates[0], "finish_reason", "") or "")
-
-            if getattr(response, "parsed", None) is not None:
-                return response.parsed
+            choice = response.choices[0]
+            finish_reason = choice.finish_reason or ""
 
             # The model can stop early because it genuinely ran out of output
-            # budget (MAX_TOKENS) even when max_output_tokens looks generous —
-            # this happens occasionally with schema-constrained generation on
-            # certain inputs, independent of the plain 429/500 errors handled
+            # budget ("length") even when max_tokens looks generous — this
+            # happens occasionally with schema-constrained generation on
+            # certain inputs, independent of the plain 429/5xx errors handled
             # below. Retrying with a bigger budget (no backoff needed — this
             # isn't a rate limit) usually resolves it.
-            if "MAX_TOKENS" in finish_reason:
+            if finish_reason == "length":
                 last_error = AnalysisError(
-                    f"Response was truncated (MAX_TOKENS) at max_output_tokens={current_max_tokens}."
+                    f"Response was truncated (length) at max_tokens={current_max_tokens}."
                 )
-                current_max_tokens = min(current_max_tokens * 2, 32768)
+                current_max_tokens = min(current_max_tokens * 2, 16384)
                 continue
 
-            text = (response.text or "").strip()
+            refusal = getattr(choice.message, "refusal", None)
+            if refusal:
+                raise AnalysisError(f"OpenAI refused the request: {refusal}")
+
+            if getattr(choice.message, "parsed", None) is not None:
+                return choice.message.parsed
+
+            text = (choice.message.content or "").strip()
             if not text:
-                raise AnalysisError(f"Gemini returned an empty response (finish_reason={finish_reason or 'unknown'}).")
+                raise AnalysisError(f"OpenAI returned an empty response (finish_reason={finish_reason or 'unknown'}).")
             return text
 
-        except errors.ClientError as e:
-            if getattr(e, "code", None) == 429:
-                if _is_daily_quota_error(e):
-                    raise QuotaExhaustedError(
-                        "Gemini's daily free-tier quota is used up for this API key/project. "
-                        "It resets at midnight Pacific time — try again tomorrow, or enable "
-                        "billing on the Google Cloud project to lift the cap."
-                    ) from e
-                last_error = e
-                time.sleep(backoff)
-                backoff *= 2
-                continue
-            raise AnalysisError(f"Gemini rejected the request: {e}") from e
+        except openai.LengthFinishReasonError as e:
+            # Belt-and-suspenders: some SDK versions raise this directly
+            # instead of surfacing finish_reason == "length" on the choice.
+            last_error = AnalysisError(f"Response was truncated at max_tokens={current_max_tokens}.")
+            current_max_tokens = min(current_max_tokens * 2, 16384)
+            continue
 
-        except errors.ServerError as e:
+        except openai.AuthenticationError as e:
+            raise AnalysisError(
+                "OpenRouter rejected the API key (401 invalid_api_key). Double check the key "
+                "in your .env / sidebar is a genuine OpenRouter key (starts with 'sk-or-v1-')."
+            ) from e
+
+        except openai.RateLimitError as e:
+            if _is_quota_exhausted_error(e):
+                raise QuotaExhaustedError(
+                    "OpenRouter reports this API key is out of credits (or over its rate "
+                    "limit). Check balance/limits at openrouter.ai/credits, or try again "
+                    "shortly if this is just a short-term rate limit."
+                ) from e
             last_error = e
             time.sleep(backoff)
             backoff *= 2
             continue
 
-        except errors.APIError as e:
-            raise AnalysisError(f"Gemini API error: {e}") from e
+        except (openai.APITimeoutError, openai.APIConnectionError, openai.InternalServerError) as e:
+            last_error = e
+            time.sleep(backoff)
+            backoff *= 2
+            continue
+
+        except openai.APIStatusError as e:
+            # OpenRouter returns 402 Payment Required (not a plain 429) when
+            # the key is out of credits — the base openai SDK has no
+            # dedicated exception subclass for 402, so it surfaces as the
+            # generic APIStatusError. Treat it the same as a quota error
+            # rather than falling through to the catch-all APIError below.
+            if getattr(e, "status_code", None) == 402:
+                raise QuotaExhaustedError(
+                    "OpenRouter reports this API key is out of credits. "
+                    "Add credits at openrouter.ai/credits."
+                ) from e
+            raise AnalysisError(f"OpenRouter/OpenAI API error: {e}") from e
+
+        except openai.APIError as e:
+            raise AnalysisError(f"OpenRouter/OpenAI API error: {e}") from e
 
     raise AnalysisError(
-        f"Gemini kept failing after {MAX_RETRIES} attempts (transient errors). "
+        f"OpenAI kept failing after {MAX_RETRIES} attempts (transient errors). "
         f"Last error: {last_error}"
     )
 
@@ -289,7 +353,7 @@ def _parse_fallback_json(result, label: str) -> dict:
     except json.JSONDecodeError as e:
         preview = cleaned[:300].replace("\n", " ")
         raise AnalysisError(
-            f"Could not parse Gemini's {label} response as JSON: {e}. Got: \"{preview}...\""
+            f"Could not parse OpenAI's {label} response as JSON: {e}. Got: \"{preview}...\""
         ) from e
 
 
@@ -341,10 +405,10 @@ def generate_proposal_outline(rfp_text: str, company_profile: dict, api_key: str
     (not folded silently into analyze_rfp's internals) so it can be invoked,
     tested, or reused independently."""
     if not api_key:
-        raise AnalysisError("No Gemini API key configured.")
-    client = genai.Client(api_key=api_key)
+        raise AnalysisError("No OpenAI API key configured.")
+    client = OpenAI(api_key=api_key, base_url=OPENROUTER_BASE_URL)
     prompt = _build_outline_prompt(company_profile)
-    result = _call_gemini_with_retry(client, prompt, rfp_text, ProposalOutline, max_output_tokens=4096)
+    result = _call_openai_with_retry(client, prompt, rfp_text, ProposalOutline, max_output_tokens=4096)
     if isinstance(result, ProposalOutline):
         outline = result.model_dump()
     else:
@@ -352,17 +416,83 @@ def generate_proposal_outline(rfp_text: str, company_profile: dict, api_key: str
     return _apply_outline_numbering(outline)
 
 
+def _build_response_generation_prompt(questions: list, knowledge_base: dict) -> str:
+    kb_json = json.dumps(knowledge_base, indent=2)
+    questions_list = "\n".join(f"{i + 1}. {q}" for i, q in enumerate(questions))
+    return f"""You are a proposal writer for SPS, drafting first-pass answers to questions an RFP
+has asked. Answer EVERY question using ONLY the facts in the COMPANY KNOWLEDGE BASE below —
+do not invent capabilities, certifications, project history, or figures that aren't present
+in it. If the knowledge base genuinely doesn't cover something a question asks for, say so
+plainly in the response rather than making it up.
+
+Also use the RFP TEXT (provided as the main content) for context — reference the RFP's own
+specifics (e.g. its scope, department count, technology) where relevant, so the answer reads
+as written FOR this RFP rather than as a generic boilerplate paragraph.
+
+COMPANY KNOWLEDGE BASE (the only source of truth for company facts):
+{kb_json}
+
+QUESTIONS TO ANSWER (answer every one, in this exact order):
+{questions_list}
+
+For each question, write a professional, proposal-ready response of 2-4 sentences. Respond
+with ONLY a raw JSON object (no commentary, no markdown fences) matching:
+{{
+  "responses": [
+    {{"question": "string (repeat the question as given)", "response": "string",
+      "basedOn": "string|null (which knowledge base section(s) grounded this, e.g. \\"project_portfolio, security_compliance\\", or null if the question needed no specific section)"}}
+  ]
+}}
+"responses" must contain exactly {len(questions)} entries, in the same order as the questions
+above."""
+
+
+def generate_question_responses(rfp_text: str, questions: list, api_key: str) -> list:
+    """
+    Phase 6 (AI Response Generation): drafts a first-pass proposal answer for
+    each question extracted in Phase 2 (analyze_rfp's "questions" field),
+    grounded in the company knowledge base (knowledge_base.py) rather than
+    the model's own guesses.
+
+    Deliberately a SEPARATE, on-demand call (triggered by a button in the
+    UI) rather than something analyze_rfp always runs automatically — not
+    every RFP has extracted questions, and this is the kind of step a real
+    proposal writer would trigger deliberately, not something that should
+    silently cost extra API calls on every analysis.
+
+    questions: list of question strings (or the extracted-question dicts —
+    only the "question" text is used here).
+    Returns a list of {"question", "response", "basedOn"} dicts.
+    """
+    if not api_key:
+        raise AnalysisError("No OpenAI API key configured.")
+    if not questions:
+        return []
+
+    question_texts = [q.get("question") if isinstance(q, dict) else str(q) for q in questions]
+
+    client = OpenAI(api_key=api_key, base_url=OPENROUTER_BASE_URL)
+    kb = get_full_knowledge_base()
+    prompt = _build_response_generation_prompt(question_texts, kb)
+    result = _call_openai_with_retry(client, prompt, rfp_text, ResponseGenerationResult, max_output_tokens=8192)
+
+    if isinstance(result, ResponseGenerationResult):
+        return result.model_dump()["responses"]
+    parsed = _parse_fallback_json(result, "response generation")
+    return parsed.get("responses", [])
+
+
 def analyze_rfp(rfp_text: str, company_profile: dict, api_key: str, doc_names: list = None) -> dict:
     """
-    Runs the full analysis as multiple Gemini calls:
+    Runs the full analysis as multiple OpenAI calls:
       1. Core analysis (verdict, deliverables, criteria, dates/budget, risks, strengths).
       2. The compliance checklist, split into one call PER DEPARTMENT (Financial,
          Legal, Operations, Technical) rather than one call for all 35 items.
-         Gemini's controlled generation rejects a single schema requiring an
-         exact-length array of 35 complex nested objects ("too many states for
-         serving") — splitting into 4 smaller exact-length arrays (6/13/11/5
-         items) keeps each call's constraint grammar small enough to serve,
-         while still guaranteeing an exact item count per department.
+         A single schema requiring an exact-length array of 35 complex nested
+         objects pushes against structured-outputs limits and hurts reliability —
+         splitting into 4 smaller exact-length arrays (6/13/11/5 items) keeps
+         each call's schema small enough to be answered reliably, while still
+         guaranteeing an exact item count per department.
     If any individual department call fails, the others still proceed — a
     single failed department degrades to "REVIEW — not returned" for just
     that department's items rather than failing the whole analysis.
@@ -376,13 +506,13 @@ def analyze_rfp(rfp_text: str, company_profile: dict, api_key: str, doc_names: l
     point or checklist item's evidence came from (docRef).
     """
     if not api_key:
-        raise AnalysisError("No Gemini API key configured.")
+        raise AnalysisError("No OpenAI API key configured.")
 
-    client = genai.Client(api_key=api_key)
+    client = OpenAI(api_key=api_key, base_url=OPENROUTER_BASE_URL)
 
     # --- Call 1: core analysis ---
     core_prompt = _build_core_system_prompt(company_profile, doc_names)
-    core_result = _call_gemini_with_retry(client, core_prompt, rfp_text, RFPCoreAnalysis, max_output_tokens=16384)
+    core_result = _call_openai_with_retry(client, core_prompt, rfp_text, RFPCoreAnalysis, max_output_tokens=16384)
     if isinstance(core_result, RFPCoreAnalysis):
         data = core_result.model_dump()
     else:
@@ -398,7 +528,7 @@ def analyze_rfp(rfp_text: str, company_profile: dict, api_key: str, doc_names: l
         try:
             prompt = _build_compliance_system_prompt(company_profile, category, doc_names)
             schema = build_category_checklist_schema(cat_count)
-            result = _call_gemini_with_retry(client, prompt, rfp_text, schema, max_output_tokens=8192)
+            result = _call_openai_with_retry(client, prompt, rfp_text, schema, max_output_tokens=8192)
             if hasattr(result, "model_dump"):
                 all_raw_items.extend(result.model_dump()["items"])
             else:
@@ -453,6 +583,7 @@ def _merge_compliance(ai_items: list) -> list:
             "item": ci["item"],
             "question": ci["question"],
             "status": (found or {}).get("status", "REVIEW"),
+            "gapType": (found or {}).get("gapType") or ("Requires Clarification" if not found else None),
             "reason": (found or {}).get("reason", "Not returned by the model — re-run the analysis or check this item manually."),
             "evidence": (found or {}).get("evidence"),
             "docRef": (found or {}).get("docRef"),
