@@ -5,8 +5,7 @@ Sends the RFP text + company profile to OpenAI and gets back a strict JSON
 analysis: verdict, deliverables, evaluation criteria, a checklist-item-by-item
 compliance breakdown, key dates/budget, and a risk assessment.
 
-Design notes (matching the pattern used elsewhere in SPS's internship
-projects):
+:
 - Structured JSON output (OpenAI's "structured outputs" via the
   `beta.chat.completions.parse` helper + a Pydantic response_format) rather
   than free-text parsing, so scores/counts/badges are computed, not guessed.
