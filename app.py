@@ -62,6 +62,7 @@ st.set_page_config(page_title="RFP Analyzer", page_icon="\U0001F4C4", layout="wi
 # ---------------------------------------------------------------------------
 dark_mode = st.session_state.get("dark_mode", False)
 
+<<<<<<< HEAD
 if dark_mode:
     _root_vars = """
     --ink: #F1F5F9;
@@ -113,70 +114,121 @@ st.markdown("""
 
 :root {
 __ROOT_VARS__
+=======
+:root {
+    --ink: #050811;
+    --ink-soft: #0F172A;
+    --ink-line: #1E293B;
+    --surface: #090D16;
+    --card: #131C2E;
+    --card-hover: #19253C;
+    --border: #26344E;
+    --border-light: #1E293B;
+    --text: #F1F5F9;
+    --text-muted: #94A3B8;
+    --teal: #06B6D4;
+    --teal-soft: rgba(6, 182, 212, 0.18);
+    --indigo: #818CF8;
+    --indigo-soft: rgba(129, 140, 248, 0.18);
+    --go: #10B981;
+    --go-soft: rgba(16, 185, 129, 0.18);
+    --warn: #F59E0B;
+    --warn-soft: rgba(245, 158, 11, 0.18);
+    --danger: #EF4444;
+    --danger-soft: rgba(239, 68, 68, 0.18);
 }
 
-html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
-.stApp { background: var(--surface); }
+html, body, [class*="css"] {
+    font-family: 'Inter', sans-serif;
+    color: var(--text);
+}
+
+.stApp {
+    background-color: var(--surface) !important;
+    color: var(--text) !important;
+>>>>>>> 714288aad488a1646d520d53e70f46da55481e0d
+}
+
 .mono { font-family: 'JetBrains Mono', monospace; font-variant-numeric: tabular-nums; }
+
+/* ---- Text & Headings global overrides ---- */
+h1, h2, h3, h4, h5, h6, label, p, span, div {
+    color: var(--text);
+}
+.stMarkdown p, .stMarkdown span {
+    color: var(--text);
+}
 
 /* ---- Logo mark (reused in sidebar + hero) ---- */
 .logo-mark {
     display: inline-flex; align-items: center; justify-content: center;
     width: 34px; height: 34px; border-radius: 9px; flex-shrink: 0;
+<<<<<<< HEAD
     background: linear-gradient(135deg, var(--teal) 0%, var(--sidebar-bg) 130%);
     color: #fff; font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 14px;
     box-shadow: 0 2px 6px rgba(14, 116, 144, 0.35);
+=======
+    background: linear-gradient(135deg, var(--teal) 0%, #3B82F6 100%);
+    color: #FFFFFF; font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 14px;
+    box-shadow: 0 2px 8px rgba(6, 182, 212, 0.4);
+>>>>>>> 714288aad488a1646d520d53e70f46da55481e0d
 }
 
 /* ---- Sidebar ---- */
 section[data-testid="stSidebar"] {
+<<<<<<< HEAD
     background: var(--sidebar-bg);
     border-right: 1px solid var(--ink-line);
+=======
+    background-color: var(--ink) !important;
+    border-right: 1px solid var(--border) !important;
+>>>>>>> 714288aad488a1646d520d53e70f46da55481e0d
 }
-section[data-testid="stSidebar"] * { color: #E2E8F0 !important; }
-section[data-testid="stSidebar"] .stCaption, section[data-testid="stSidebar"] small { color: #8B94AC !important; }
-section[data-testid="stSidebar"] hr { border-color: var(--ink-line); }
-section[data-testid="stSidebar"] input, section[data-testid="stSidebar"] textarea {
+section[data-testid="stSidebar"] * { color: #F1F5F9 !important; }
+section[data-testid="stSidebar"] .stCaption, section[data-testid="stSidebar"] small { color: #94A3B8 !important; }
+section[data-testid="stSidebar"] hr { border-color: var(--border) !important; }
+section[data-testid="stSidebar"] input, section[data-testid="stSidebar"] textarea, section[data-testid="stSidebar"] select {
     background: var(--ink-soft) !important;
-    color: #F1F5F9 !important;
-    border: 1px solid var(--ink-line) !important;
+    color: #F8FAFC !important;
+    border: 1px solid var(--border) !important;
     border-radius: 6px !important;
 }
 .sidebar-brand {
     display: flex; align-items: center; gap: 10px;
     padding: 2px 0 18px 0;
-    border-bottom: 1px solid var(--ink-line);
+    border-bottom: 1px solid var(--border);
     margin-bottom: 16px;
 }
 .sidebar-brand .brand-title { font-size: 16.5px; font-weight: 700; color: #FFFFFF !important; letter-spacing: -0.2px; line-height: 1.25; }
-.sidebar-brand .brand-sub { font-size: 11.5px; color: #8B94AC !important; margin-top: 1px; }
+.sidebar-brand .brand-sub { font-size: 11.5px; color: #94A3B8 !important; margin-top: 1px; }
 .sidebar-section-label {
-    font-size: 11px; font-weight: 700; letter-spacing: 0.8px; color: #8B94AC;
+    font-size: 11px; font-weight: 700; letter-spacing: 0.8px; color: #94A3B8 !important;
     text-transform: uppercase; margin: 6px 0 10px 0;
 }
 .status-pill {
     display: inline-flex; align-items: center; gap: 7px;
     font-size: 12.5px; font-weight: 600; padding: 7px 12px; border-radius: 999px;
-    background: var(--ink-soft); border: 1px solid var(--ink-line); margin-bottom: 6px;
+    background: var(--ink-soft); border: 1px solid var(--border); margin-bottom: 6px;
+    color: #F1F5F9 !important;
 }
 .status-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
-.status-dot.on { background: #34D399; box-shadow: 0 0 0 3px rgba(52,211,153,0.18); }
-.status-dot.off { background: #F87171; box-shadow: 0 0 0 3px rgba(248,113,113,0.18); }
+.status-dot.on { background: #34D399; box-shadow: 0 0 0 3px rgba(52,211,153,0.25); }
+.status-dot.off { background: #F87171; box-shadow: 0 0 0 3px rgba(248,113,113,0.25); }
 
 /* ---- Hero ---- */
 .dashboard-hero { display: flex; align-items: center; gap: 12px; padding: 4px 0 20px 0; }
 .dashboard-hero .hero-title {
-    font-size: 22px; font-weight: 800; color: var(--ink);
+    font-size: 22px; font-weight: 800; color: #F8FAFC !important;
     letter-spacing: -0.4px; line-height: 1.2;
 }
-.dashboard-hero .hero-sub { font-size: 13.5px; color: var(--text-muted); margin-top: 1px; }
+.dashboard-hero .hero-sub { font-size: 13.5px; color: var(--text-muted) !important; margin-top: 1px; }
 
 /* ---- Cards ---- */
 div[data-testid="stVerticalBlockBorderWrapper"] {
-    background: var(--card);
+    background: var(--card) !important;
     border: 1px solid var(--border) !important;
     border-radius: 12px !important;
-    box-shadow: 0 1px 2px rgba(11, 17, 32, 0.04);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3) !important;
 }
 div[data-testid="stVerticalBlockBorderWrapper"]:has(.status-flag-go) { border-left: 4px solid var(--go) !important; }
 div[data-testid="stVerticalBlockBorderWrapper"]:has(.status-flag-conditional) { border-left: 4px solid var(--warn) !important; }
@@ -188,29 +240,31 @@ div[data-testid="stVerticalBlockBorderWrapper"]:has(.status-flag-nogo) { border-
     font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 13.5px;
     letter-spacing: 0.4px; padding: 7px 14px; border-radius: 999px; margin-bottom: 4px;
 }
-.verdict-pill.go { background: var(--go-soft); color: var(--go); }
-.verdict-pill.conditional { background: var(--warn-soft); color: var(--warn); }
-.verdict-pill.nogo { background: var(--danger-soft); color: var(--danger); }
+.verdict-pill.go { background: var(--go-soft); color: var(--go); border: 1px solid rgba(16, 185, 129, 0.3); }
+.verdict-pill.conditional { background: var(--warn-soft); color: var(--warn); border: 1px solid rgba(245, 158, 11, 0.3); }
+.verdict-pill.nogo { background: var(--danger-soft); color: var(--danger); border: 1px solid rgba(239, 68, 68, 0.3); }
 
 /* ---- AI vs. rule-based badges ---- */
 .badge-ai {
     display: inline-block; font-size: 10.5px; font-weight: 700; letter-spacing: 0.3px;
     padding: 2px 8px; border-radius: 5px; background: var(--indigo-soft); color: var(--indigo);
+    border: 1px solid rgba(129, 140, 248, 0.3);
 }
 .badge-rule {
     display: inline-block; font-size: 10.5px; font-weight: 700; letter-spacing: 0.3px;
     padding: 2px 8px; border-radius: 5px; background: var(--teal-soft); color: var(--teal);
+    border: 1px solid rgba(6, 182, 212, 0.3);
 }
 
 /* ---- Custom metric tiles ---- */
 .metric-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 6px 0 14px 0; }
 .metric-tile {
-    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    background: #0D1526; border: 1px solid var(--border); border-radius: 10px;
     padding: 12px 14px;
 }
-.metric-tile .metric-label { font-size: 11px; font-weight: 600; letter-spacing: 0.4px; color: var(--text-muted); text-transform: uppercase; }
+.metric-tile .metric-label { font-size: 11px; font-weight: 600; letter-spacing: 0.4px; color: var(--text-muted) !important; text-transform: uppercase; }
 .metric-tile .metric-value {
-    font-family: 'JetBrains Mono', monospace; font-size: 20px; font-weight: 700; color: var(--ink);
+    font-family: 'JetBrains Mono', monospace; font-size: 20px; font-weight: 700; color: #F8FAFC !important;
     margin-top: 3px; font-variant-numeric: tabular-nums;
 }
 @media (max-width: 700px) {
@@ -219,37 +273,77 @@ div[data-testid="stVerticalBlockBorderWrapper"]:has(.status-flag-nogo) { border-
 
 /* ---- Buttons ---- */
 .stButton>button {
-    border-radius: 8px; font-weight: 600; border: 1px solid var(--border);
+    border-radius: 8px; font-weight: 600; background: var(--ink-soft);
+    border: 1px solid var(--border); color: #F1F5F9 !important;
     transition: all 0.12s ease;
 }
-.stButton>button[kind="primary"] {
-    background: var(--teal); border: none; box-shadow: 0 1px 2px rgba(14,116,144,0.25);
+.stButton>button:hover {
+    background: var(--card-hover); border-color: var(--teal); color: #FFFFFF !important;
 }
-.stButton>button[kind="primary"]:hover { background: #0891B2; transform: translateY(-1px); }
+.stButton>button[kind="primary"] {
+    background: var(--teal); border: none; color: #090D16 !important; font-weight: 700;
+    box-shadow: 0 2px 8px rgba(6, 182, 212, 0.35);
+}
+.stButton>button[kind="primary"]:hover { background: #22D3EE; transform: translateY(-1px); color: #090D16 !important; }
 section[data-testid="stSidebar"] .stButton>button {
-    background: var(--ink-soft); border: 1px solid var(--ink-line); color: #E2E8F0 !important;
+    background: var(--ink-soft); border: 1px solid var(--border); color: #F1F5F9 !important;
+}
+
+/* ---- Form Inputs & Selects ---- */
+input, textarea, select, div[data-baseweb="select"] > div {
+    background-color: #0D1526 !important;
+    color: #F8FAFC !important;
+    border-color: var(--border) !important;
 }
 
 /* ---- Tabs ---- */
-.stTabs [data-baseweb="tab-list"] { gap: 4px; border-bottom: 2px solid var(--border); }
+.stTabs [data-baseweb="tab-list"] { gap: 4px; border-bottom: 2px solid var(--border) !important; background: transparent !important; }
 .stTabs [data-baseweb="tab"] {
-    height: 42px; border-radius: 7px 7px 0 0; font-weight: 600; color: var(--text-muted);
+    height: 42px; border-radius: 7px 7px 0 0; font-weight: 600; color: var(--text-muted) !important; background: transparent !important;
 }
-.stTabs [aria-selected="true"] { color: var(--teal) !important; border-bottom: 2px solid var(--teal); }
+.stTabs [aria-selected="true"] { color: var(--teal) !important; border-bottom: 2px solid var(--teal) !important; background: transparent !important; }
 
-/* ---- Native st.metric (still used in a couple of tabs) ---- */
+/* ---- Native st.metric ---- */
 div[data-testid="stMetric"] {
-    background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+    background: var(--card) !important; border: 1px solid var(--border) !important; border-radius: 10px;
     padding: 12px 16px;
 }
 div[data-testid="stMetricValue"] {
-    color: var(--ink); font-weight: 700; font-family: 'JetBrains Mono', monospace;
+    color: #F8FAFC !important; font-weight: 700; font-family: 'JetBrains Mono', monospace;
+}
+div[data-testid="stMetricLabel"] {
+    color: var(--text-muted) !important;
 }
 
 /* ---- Expanders ---- */
 div[data-testid="stExpander"] {
+<<<<<<< HEAD
     background: var(--card);
     border: 1px solid var(--border) !important; border-radius: 8px !important;
+=======
+    border: 1px solid var(--border) !important; border-radius: 8px !important; background: var(--card) !important;
+}
+div[data-testid="stExpander"] summary {
+    color: #F1F5F9 !important;
+}
+
+/* ---- Radio Buttons ---- */
+div[role="radiogroup"] label {
+    color: #F1F5F9 !important;
+}
+
+/* ---- File Uploader ---- */
+section[data-testid="stFileUploader"] {
+    background: #0D1526 !important;
+    border: 1px dashed var(--border) !important;
+    border-radius: 10px !important;
+    padding: 12px !important;
+}
+
+/* ---- Captions ---- */
+.stCaption, small {
+    color: var(--text-muted) !important;
+>>>>>>> 714288aad488a1646d520d53e70f46da55481e0d
 }
 /* Sidebar expanders (Company Profile, History) sit on the permanently-dark
    sidebar, so they use the fixed sidebar tones, not var(--card) — otherwise
@@ -261,7 +355,7 @@ section[data-testid="stSidebar"] div[data-testid="stExpander"] {
 }
 
 /* ---- Misc ---- */
-hr { margin: 1.2rem 0; }
+hr { margin: 1.2rem 0; border-color: var(--border) !important; }
 </style>
 """.replace("__ROOT_VARS__", _root_vars), unsafe_allow_html=True)
 
@@ -777,7 +871,11 @@ if analysis:
     ])
 
     with tabs[0]:
+<<<<<<< HEAD
         PRIORITY_COLOR = {"High": "#DC2626", "Medium": "#D97706", "Low": "var(--text-muted)"}
+=======
+        PRIORITY_COLOR = {"High": "#EF4444", "Medium": "#F59E0B", "Low": "#94A3B8"}
+>>>>>>> 714288aad488a1646d520d53e70f46da55481e0d
         if not deliverables:
             st.caption("No deliverables extracted.")
         sorted_deliverables = sorted(
@@ -788,10 +886,17 @@ if analysis:
         for i, d in enumerate(sorted_deliverables, start=1):
             mandatory = d.get("mandatory")
             kind_label = "Mandatory" if mandatory else "Optional"
+<<<<<<< HEAD
             kind_color = "#DC2626" if mandatory else "var(--text-muted)"
             days = d.get("estimatedDays")
             priority = d.get("priority", "Medium")
             pc = PRIORITY_COLOR.get(priority, "var(--text-muted)")
+=======
+            kind_color = "#EF4444" if mandatory else "#94A3B8"
+            days = d.get("estimatedDays")
+            priority = d.get("priority", "Medium")
+            pc = PRIORITY_COLOR.get(priority, "#94A3B8")
+>>>>>>> 714288aad488a1646d520d53e70f46da55481e0d
 
             points_html = ""
             for j, p in enumerate(d.get("points", []) or [], start=1):
@@ -802,13 +907,19 @@ if analysis:
                 ref_bits = [r for r in (doc_ref, section_ref, page_ref) if r]
                 ref_str = f" <span style='color:#94A3B8; font-size:11px; font-style:italic;'>({', '.join(ref_bits)})</span>" if ref_bits else ""
                 points_html += (
+<<<<<<< HEAD
                     f"<div style='padding:4px 0; font-size:13.5px; color:var(--text);'>"
                     f"<b style='color:var(--ink);'>{i}.{j}</b>&nbsp; {point_text}{ref_str}</div>"
+=======
+                    f"<div style='padding:4px 0; font-size:13.5px; color:#CBD5E1;'>"
+                    f"<b style='color:#F8FAFC;'>{i}.{j}</b>&nbsp; {point_text}{ref_str}</div>"
+>>>>>>> 714288aad488a1646d520d53e70f46da55481e0d
                 )
 
             st.markdown(
                 f"""
                 <div style="background:var(--card); border:1px solid var(--border); border-radius:10px;
+<<<<<<< HEAD
                             padding:16px 18px; margin-bottom:12px; box-shadow:0 1px 3px rgba(11,17,32,0.04);">
                     <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:10px; margin-bottom:8px;">
                         <div style="font-weight:700; font-size:15px; color:var(--ink);">{i}. {d.get('description','')}</div>
@@ -817,6 +928,16 @@ if analysis:
                         <span style="font-size:11px; font-weight:700; color:{pc}; background:{pc}18; padding:3px 10px; border-radius:20px;">{priority.upper()}</span>
                         <span style="font-size:11px; font-weight:700; color:{kind_color}; background:{kind_color}18; padding:3px 10px; border-radius:20px;">{kind_label.upper()}</span>
                         {f"<span style='font-size:11px; font-weight:700; color:#0E7490; background:#0E749018; padding:3px 10px; border-radius:20px;' class='mono'>&#9201; {days}d</span>" if days is not None else ""}
+=======
+                            padding:16px 18px; margin-bottom:12px; box-shadow:0 2px 6px rgba(0,0,0,0.25);">
+                    <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:10px; margin-bottom:8px;">
+                        <div style="font-weight:700; font-size:15px; color:#F8FAFC;">{i}. {d.get('description','')}</div>
+                    </div>
+                    <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:10px;">
+                        <span style="font-size:11px; font-weight:700; color:{pc}; background:{pc}22; padding:3px 10px; border-radius:20px;">{priority.upper()}</span>
+                        <span style="font-size:11px; font-weight:700; color:{kind_color}; background:{kind_color}22; padding:3px 10px; border-radius:20px;">{kind_label.upper()}</span>
+                        {f"<span style='font-size:11px; font-weight:700; color:#38BDF8; background:#38BDF822; padding:3px 10px; border-radius:20px;'>&#9201; {days}d</span>" if days is not None else ""}
+>>>>>>> 714288aad488a1646d520d53e70f46da55481e0d
                     </div>
                     {points_html}
                 </div>
@@ -835,6 +956,7 @@ if analysis:
         dept_scores = analysis.get("departmentScores", {})
         if dept_scores:
             overall = dept_scores.get("overall", {})
+<<<<<<< HEAD
             rec_color = {"Proceed": "#16A34A", "Review Needed": "#D97706", "High Risk": "#DC2626"}.get(overall.get("recommendation"), "var(--text-muted)")
             st.markdown(f"""
             <div style="background:var(--card); border:1px solid var(--border); border-radius:10px; padding:16px 18px; margin-bottom:14px; box-shadow:0 1px 3px rgba(11,17,32,0.04);">
@@ -844,22 +966,42 @@ if analysis:
                     <span style="background:{rec_color}18; color:{rec_color}; padding:3px 12px; border-radius:20px; font-size:12px; font-weight:700;">{overall.get('recommendation','')}</span>
                 </div>
                 <div style="font-size:12.5px; color:var(--text-muted);">{overall.get('summary','')}</div>
+=======
+            rec_color = {"Proceed": "#10B981", "Review Needed": "#F59E0B", "High Risk": "#EF4444"}.get(overall.get("recommendation"), "#94A3B8")
+            st.markdown(f"""
+            <div style="background:var(--card); border:1px solid var(--border); border-radius:10px; padding:16px 18px; margin-bottom:14px; box-shadow:0 2px 6px rgba(0,0,0,0.25);">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+                    <span style="font-weight:700; font-size:13px; color:#94A3B8; letter-spacing:0.4px;">OVERALL COMPLIANCE</span>
+                    <span style="font-weight:800; font-size:22px; color:#F8FAFC;">{overall.get('score','—')}%</span>
+                    <span style="background:{rec_color}22; color:{rec_color}; padding:3px 12px; border-radius:20px; font-size:12px; font-weight:700;">{overall.get('recommendation','')}</span>
+                </div>
+                <div style="font-size:12.5px; color:#94A3B8;">{overall.get('summary','')}</div>
+>>>>>>> 714288aad488a1646d520d53e70f46da55481e0d
             </div>
             """, unsafe_allow_html=True)
             cols = st.columns(len(dept_scores.get("byCategory", {})) or 1)
             for i, (cat, s) in enumerate(dept_scores.get("byCategory", {}).items()):
+<<<<<<< HEAD
                 rc = {"Proceed": "#16A34A", "Review Needed": "#D97706", "High Risk": "#DC2626"}.get(s.get("recommendation"), "var(--text-muted)")
                 with cols[i]:
                     st.markdown(f"""
                     <div style="background:var(--card); border:1px solid var(--border); border-radius:10px; padding:12px 10px; text-align:center; box-shadow:0 1px 3px rgba(11,17,32,0.04);">
                         <div style="font-size:11px; color:#94A3B8; text-transform:uppercase; font-weight:600; letter-spacing:0.4px;">{s.get('title','')}</div>
                         <div style="font-size:24px; font-weight:800; color:var(--ink); font-family:'JetBrains Mono',monospace;">{s.get('score','—')}%</div>
+=======
+                rc = {"Proceed": "#10B981", "Review Needed": "#F59E0B", "High Risk": "#EF4444"}.get(s.get("recommendation"), "#94A3B8")
+                with cols[i]:
+                    st.markdown(f"""
+                    <div style="background:var(--card); border:1px solid var(--border); border-radius:10px; padding:12px 10px; text-align:center; box-shadow:0 2px 6px rgba(0,0,0,0.25);">
+                        <div style="font-size:11px; color:#94A3B8; text-transform:uppercase; font-weight:600; letter-spacing:0.4px;">{s.get('title','')}</div>
+                        <div style="font-size:24px; font-weight:800; color:#F8FAFC;">{s.get('score','—')}%</div>
+>>>>>>> 714288aad488a1646d520d53e70f46da55481e0d
                         <div style="font-size:11px; color:{rc}; font-weight:700;">{s.get('recommendation','')}</div>
                     </div>
                     """, unsafe_allow_html=True)
             st.caption("Scores are computed directly from the checklist below (GO=100, REVIEW=50, NO-GO=0, averaged per department) — not separately judged by the AI, so they're always consistent with the detailed results.")
 
-        STATUS_COLOR = {"GO": "#16A34A", "NO-GO": "#DC2626", "REVIEW": "#7C3AED"}
+        STATUS_COLOR = {"GO": "#10B981", "NO-GO": "#EF4444", "REVIEW": "#A855F7"}
 
         filter_choice = st.radio(
             "Show", ["All", "GO", "NO-GO", "REVIEW"], horizontal=True, key="checklist_status_filter",
@@ -877,18 +1019,19 @@ if analysis:
                 rows_html = ""
                 for it in cat_items:
                     status = it.get("status", "REVIEW")
-                    color = STATUS_COLOR.get(status, "#7C3AED")
+                    color = STATUS_COLOR.get(status, "#A855F7")
                     gap_type = it.get("gapType")
-                    status_badge = f"<span style=\"background:{color}18; color:{color}; padding:3px 10px; border-radius:20px; font-size:11px; font-weight:700;\">{status}</span>"
+                    status_badge = f"<span style=\"background:{color}22; color:{color}; padding:3px 10px; border-radius:20px; font-size:11px; font-weight:700;\">{status}</span>"
                     if status == "REVIEW" and gap_type:
                         status_badge += f"<br><span style='font-size:10px; color:#94A3B8; font-style:italic;'>{gap_type}</span>"
                     if it.get("overridden"):
-                        status_badge += "<br><span style='font-size:9px; color:#2563EB; font-weight:700;'>\u270f\uFE0F MANUALLY OVERRIDDEN</span>"
-                    evidence = it.get("evidence") or "<span style='color:#94A3B8;'>Not cited in RFP</span>"
+                        status_badge += "<br><span style='font-size:9px; color:#60A5FA; font-weight:700;'>✏️ MANUALLY OVERRIDDEN</span>"
+                    evidence = it.get("evidence") or "<span style='color:#64748B;'>Not cited in RFP</span>"
                     cite_bits = [r for r in (it.get("docRef"), it.get("pageRef")) if r]
                     if cite_bits:
                         evidence += f" <span style='color:#94A3B8; font-style:italic;'>({', '.join(cite_bits)})</span>"
                     rows_html += f"""
+<<<<<<< HEAD
                     <tr style="border-bottom:1px solid var(--border);">
                         <td style="padding:10px 8px; vertical-align:top; font-weight:600; color:var(--ink); width:18%;">{it.get('item','')}</td>
                         <td style="padding:10px 8px; vertical-align:top; width:10%;">
@@ -896,11 +1039,24 @@ if analysis:
                         </td>
                         <td style="padding:10px 8px; vertical-align:top; width:32%; font-size:13px; color:var(--text);">{it.get('reason','')}</td>
                         <td style="padding:10px 8px; vertical-align:top; width:40%; font-size:12.5px; color:var(--text-muted);">{evidence}</td>
+=======
+                    <tr style="border-bottom:1px solid #26344E;">
+                        <td style="padding:10px 8px; vertical-align:top; font-weight:600; color:#F8FAFC; width:18%;">{it.get('item','')}</td>
+                        <td style="padding:10px 8px; vertical-align:top; width:10%;">
+                            {status_badge}
+                        </td>
+                        <td style="padding:10px 8px; vertical-align:top; width:32%; font-size:13px; color:#CBD5E1;">{it.get('reason','')}</td>
+                        <td style="padding:10px 8px; vertical-align:top; width:40%; font-size:12.5px; color:#94A3B8;">{evidence}</td>
+>>>>>>> 714288aad488a1646d520d53e70f46da55481e0d
                     </tr>"""
                 table_html = f"""
                 <table style="width:100%; border-collapse:collapse;">
                     <thead>
+<<<<<<< HEAD
                         <tr style="border-bottom:2px solid var(--border); text-align:left; font-size:11px; text-transform:uppercase; color:#94A3B8; letter-spacing:0.4px;">
+=======
+                        <tr style="border-bottom:2px solid #26344E; text-align:left; font-size:11px; text-transform:uppercase; color:#94A3B8; letter-spacing:0.4px;">
+>>>>>>> 714288aad488a1646d520d53e70f46da55481e0d
                             <th style="padding:8px;">Checklist Item</th>
                             <th style="padding:8px;">Decision</th>
                             <th style="padding:8px;">Reason</th>
