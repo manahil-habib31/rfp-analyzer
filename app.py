@@ -31,6 +31,8 @@ from insights import (
 import time as time_module
 from pdf_report import generate_pdf_report
 import history_store
+import profile_store
+from calendar_link import build_google_calendar_link
 
 load_dotenv()
 history_store.init_db()
@@ -58,12 +60,34 @@ st.set_page_config(page_title="RFP Analyzer", page_icon="\U0001F4C4", layout="wi
 # (AI judgment vs. code-enforced policy) is a real, load-bearing idea in
 # this app, not just a second accent color for variety.
 # ---------------------------------------------------------------------------
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+dark_mode = st.session_state.get("dark_mode", False)
 
-:root {
+if dark_mode:
+    _root_vars = """
+    --ink: #F1F5F9;
+    --sidebar-bg: #0B1120;
+    --ink-soft: #18213A;
+    --ink-line: #263453;
+    --surface: #0B1120;
+    --card: #161C2C;
+    --border: #2A3348;
+    --text: #CBD5E1;
+    --text-muted: #8B95A8;
+    --teal: #2DD4CF;
+    --teal-soft: rgba(45, 212, 207, 0.12);
+    --indigo: #818CF8;
+    --indigo-soft: rgba(129, 140, 248, 0.14);
+    --go: #34D399;
+    --go-soft: rgba(52, 211, 153, 0.12);
+    --warn: #FBBF24;
+    --warn-soft: rgba(251, 191, 36, 0.12);
+    --danger: #F87171;
+    --danger-soft: rgba(248, 113, 113, 0.12);
+    """
+else:
+    _root_vars = """
     --ink: #0B1120;
+    --sidebar-bg: #0B1120;
     --ink-soft: #18213A;
     --ink-line: #263453;
     --surface: #F5F6FA;
@@ -72,15 +96,23 @@ st.markdown("""
     --text: #33394A;
     --text-muted: #6B7280;
     --teal: #0E7490;
-    --teal-soft: #E0F2F4;
+    --teal-soft: rgba(14, 116, 144, 0.10);
     --indigo: #4F46E5;
-    --indigo-soft: #EEEDFD;
+    --indigo-soft: rgba(79, 70, 229, 0.10);
     --go: #059669;
-    --go-soft: #ECFDF5;
+    --go-soft: rgba(5, 150, 105, 0.10);
     --warn: #D97706;
-    --warn-soft: #FFFBEB;
+    --warn-soft: rgba(217, 119, 6, 0.10);
     --danger: #DC2626;
-    --danger-soft: #FEF2F2;
+    --danger-soft: rgba(220, 38, 38, 0.10);
+    """
+
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+
+:root {
+__ROOT_VARS__
 }
 
 html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
@@ -91,14 +123,14 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 .logo-mark {
     display: inline-flex; align-items: center; justify-content: center;
     width: 34px; height: 34px; border-radius: 9px; flex-shrink: 0;
-    background: linear-gradient(135deg, var(--teal) 0%, var(--ink) 130%);
+    background: linear-gradient(135deg, var(--teal) 0%, var(--sidebar-bg) 130%);
     color: #fff; font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 14px;
     box-shadow: 0 2px 6px rgba(14, 116, 144, 0.35);
 }
 
 /* ---- Sidebar ---- */
 section[data-testid="stSidebar"] {
-    background: var(--ink);
+    background: var(--sidebar-bg);
     border-right: 1px solid var(--ink-line);
 }
 section[data-testid="stSidebar"] * { color: #E2E8F0 !important; }
@@ -216,13 +248,22 @@ div[data-testid="stMetricValue"] {
 
 /* ---- Expanders ---- */
 div[data-testid="stExpander"] {
+    background: var(--card);
     border: 1px solid var(--border) !important; border-radius: 8px !important;
+}
+/* Sidebar expanders (Company Profile, History) sit on the permanently-dark
+   sidebar, so they use the fixed sidebar tones, not var(--card) — otherwise
+   they'd flip to a light-mode white box even while Dark Mode is on, which
+   is exactly the washed-out "light box in a dark sidebar" bug this fixes. */
+section[data-testid="stSidebar"] div[data-testid="stExpander"] {
+    background: var(--ink-soft) !important;
+    border: 1px solid var(--ink-line) !important;
 }
 
 /* ---- Misc ---- */
 hr { margin: 1.2rem 0; }
 </style>
-""", unsafe_allow_html=True)
+""".replace("__ROOT_VARS__", _root_vars), unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
 # Session state defaults
@@ -242,9 +283,11 @@ if "status_overrides" not in st.session_state:
 if "analysis_duration" not in st.session_state:
     st.session_state.analysis_duration = None  # seconds the last analyze_rfp() call took, for the time-saved comparison
 if "company_profile" not in st.session_state:
-    st.session_state.company_profile = dict(DEFAULT_COMPANY_PROFILE)
+    st.session_state.company_profile = profile_store.load_profile()
 if "current_history_id" not in st.session_state:
     st.session_state.current_history_id = None  # which history_store row the active analysis was saved as
+if "dark_mode" not in st.session_state:
+    st.session_state.dark_mode = False
 
 STATUS_BADGE = {"GO": "\U0001F7E2 GO", "NO-GO": "\U0001F534 NO-GO", "REVIEW": "\u26AA REVIEW"}
 TAG_BADGE = {"GO": "\U0001F7E2 GO", "CONDITIONAL": "\U0001F7E1 CONDITIONAL", "NO-GO": "\U0001F534 NO-GO"}
@@ -400,9 +443,19 @@ with st.sidebar:
     if not api_key:
         st.caption("No API key found. Add `OPENAI_API_KEY=...` to your `.env` file and restart the app.")
 
+    new_dark_mode = st.toggle("\U0001F319 Dark mode", value=dark_mode, key="dark_mode_toggle")
+    if new_dark_mode != dark_mode:
+        st.session_state.dark_mode = new_dark_mode
+        st.rerun()
+
     st.divider()
     st.markdown("<div class='sidebar-section-label'>\U0001F3E2 Company Profile</div>", unsafe_allow_html=True)
     profile = st.session_state.company_profile
+    profile_saved = profile_store.is_saved()
+    st.caption(
+        "\u2713 Saved profile in use." if profile_saved
+        else "Using code defaults — no saved profile yet."
+    )
     with st.expander(f"Editing: {profile['company_name']}", expanded=False):
         profile["company_name"] = st.text_input("Company name", profile["company_name"])
         profile["services"] = st.text_area("Services / capabilities", profile["services"], height=70)
@@ -421,6 +474,12 @@ with st.sidebar:
             "Can provide audited financial statements", value=profile["can_provide_audited_financials"])
         profile["registered_states"] = st.text_input("State registration status", profile["registered_states"])
 
+        st.write("")
+        if st.button("\U0001F4BE Save profile", use_container_width=True, type="primary"):
+            profile_store.save_profile(profile)
+            st.toast("Company profile saved — future analyses and app restarts will use this.", icon="\u2705")
+            st.rerun()
+
     st.divider()
     st.markdown("<div class='sidebar-section-label'>\U0001F4DC History</div>", unsafe_allow_html=True)
     history_rows = history_store.list_history()
@@ -433,9 +492,10 @@ with st.sidebar:
             score = row["verdict_score"]
             label = row["rfp_identifier"] or row["source_label"] or f"RFP #{row['id']}"
             when = row["created_at"].split("T")[0] if row["created_at"] else ""
-            badge = {"GO": "\U0001F7E2", "CONDITIONAL": "\U0001F7E1", "NO-GO": "\U0001F534"}.get(tag, "\u26AA")
-            with st.expander(f"{badge} {label}  ·  {when}"):
-                st.caption(f"Score: {score}/100  ·  Tag: {tag}")
+            dot_color = {"GO": "#34D399", "CONDITIONAL": "#FBBF24", "NO-GO": "#F87171"}.get(tag, "#8B94AC")
+            badge_html = f"<span style='display:inline-block; width:7px; height:7px; border-radius:50%; background:{dot_color}; margin-right:6px;'></span>"
+            with st.expander(f"{label}  ·  {when}"):
+                st.markdown(f"{badge_html}**{tag}**&nbsp;&nbsp;·&nbsp;&nbsp;<span class='mono'>{score}/100</span>", unsafe_allow_html=True)
                 if row["submission_deadline"]:
                     st.caption(f"Deadline: {row['submission_deadline']}")
                 c1, c2 = st.columns(2)
@@ -515,6 +575,7 @@ elif uploaded_files:
 if pending_text:
     already_done = pending_docs == st.session_state.source_docs and st.session_state.analysis is not None
     if not already_done:
+        st.write("")
         st.success(f"Ready to analyze: **{pending_label}** ({len(pending_text):,} characters extracted)")
         analyze_clicked = st.button("\U0001F50D Analyze RFP", type="primary")
 
@@ -653,21 +714,40 @@ if analysis:
         urgency = get_deadline_urgency(kdb_top.get("submissionDeadlineISO"))
         readiness = get_readiness_status(compliance)
 
-        ins_col1, ins_col2 = st.columns(2)
-        with ins_col1:
-            st.markdown(
-                f"<div style='padding:10px; border-radius:6px; background:{urgency['color']}15; "
-                f"border:1px solid {urgency['color']}44;'>"
-                f"<b>Submission Deadline</b><br>{urgency['label']}</div>",
-                unsafe_allow_html=True,
-            )
-        with ins_col2:
-            st.markdown(
-                f"<div style='padding:10px; border-radius:6px; background:{readiness['color']}15; "
-                f"border:1px solid {readiness['color']}44;'>"
-                f"<b>Submission Readiness</b><br>{readiness['label']}</div>",
-                unsafe_allow_html=True,
-            )
+        cal_link = build_google_calendar_link(
+            title=f"RFP Submission Deadline: {rfp_identifier or 'Untitled RFP'}",
+            date_iso=kdb_top.get("submissionDeadlineISO"),
+            details=f"Submission deadline for {rfp_identifier or 'this RFP'}, extracted by RFP Analyzer.",
+        )
+        cal_button_html = (
+            f"<a href='{cal_link}' target='_blank' rel='noopener' style='display:block; text-align:center; "
+            f"margin-top:10px; padding:7px 10px; border-radius:7px; border:1px solid var(--border); "
+            f"background:var(--card); color:var(--teal); font-size:12.5px; font-weight:600; "
+            f"text-decoration:none;'>\U0001F4C5 Add to Google Calendar</a>"
+        ) if cal_link else ""
+
+        # Single grid block (not st.columns) so both boxes share one row and
+        # stretch to equal height automatically — st.columns renders each
+        # side as an independent block, so mismatched text length (a
+        # 1-line deadline vs. a 2-line readiness message) left them visibly
+        # uneven. The calendar link is now plain HTML *inside* box 1 instead
+        # of a separate st.link_button call, which removes the gap Streamlit
+        # was leaving between the two.
+        st.markdown(
+            "<div style='display:grid; grid-template-columns:1fr 1fr; gap:12px; align-items:stretch;'>"
+            f"<div style='padding:12px; border-radius:8px; background:{urgency['color']}1F; "
+            f"border:1px solid {urgency['color']}55; display:flex; flex-direction:column; justify-content:space-between;'>"
+            f"<div><b style='color:var(--text);'>Submission Deadline</b><br>"
+            f"<span style='color:var(--text-muted); font-size:13.5px;'>{urgency['label']}</span></div>"
+            f"{cal_button_html}"
+            "</div>"
+            f"<div style='padding:12px; border-radius:8px; background:{readiness['color']}1F; "
+            f"border:1px solid {readiness['color']}55;'>"
+            f"<b style='color:var(--text);'>Submission Readiness</b><br>"
+            f"<span style='color:var(--text-muted); font-size:13.5px;'>{readiness['label']}</span></div>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
 
         st.caption(get_effort_rollup(analysis))
 
@@ -697,7 +777,7 @@ if analysis:
     ])
 
     with tabs[0]:
-        PRIORITY_COLOR = {"High": "#DC2626", "Medium": "#D97706", "Low": "#64748B"}
+        PRIORITY_COLOR = {"High": "#DC2626", "Medium": "#D97706", "Low": "var(--text-muted)"}
         if not deliverables:
             st.caption("No deliverables extracted.")
         sorted_deliverables = sorted(
@@ -708,10 +788,10 @@ if analysis:
         for i, d in enumerate(sorted_deliverables, start=1):
             mandatory = d.get("mandatory")
             kind_label = "Mandatory" if mandatory else "Optional"
-            kind_color = "#DC2626" if mandatory else "#64748B"
+            kind_color = "#DC2626" if mandatory else "var(--text-muted)"
             days = d.get("estimatedDays")
             priority = d.get("priority", "Medium")
-            pc = PRIORITY_COLOR.get(priority, "#64748B")
+            pc = PRIORITY_COLOR.get(priority, "var(--text-muted)")
 
             points_html = ""
             for j, p in enumerate(d.get("points", []) or [], start=1):
@@ -722,21 +802,21 @@ if analysis:
                 ref_bits = [r for r in (doc_ref, section_ref, page_ref) if r]
                 ref_str = f" <span style='color:#94A3B8; font-size:11px; font-style:italic;'>({', '.join(ref_bits)})</span>" if ref_bits else ""
                 points_html += (
-                    f"<div style='padding:4px 0; font-size:13.5px; color:#334155;'>"
-                    f"<b style='color:#0F172A;'>{i}.{j}</b>&nbsp; {point_text}{ref_str}</div>"
+                    f"<div style='padding:4px 0; font-size:13.5px; color:var(--text);'>"
+                    f"<b style='color:var(--ink);'>{i}.{j}</b>&nbsp; {point_text}{ref_str}</div>"
                 )
 
             st.markdown(
                 f"""
-                <div style="background:#FFFFFF; border:1px solid #E2E8F0; border-radius:10px;
-                            padding:16px 18px; margin-bottom:12px; box-shadow:0 1px 3px rgba(15,23,42,0.04);">
+                <div style="background:var(--card); border:1px solid var(--border); border-radius:10px;
+                            padding:16px 18px; margin-bottom:12px; box-shadow:0 1px 3px rgba(11,17,32,0.04);">
                     <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:10px; margin-bottom:8px;">
-                        <div style="font-weight:700; font-size:15px; color:#0F172A;">{i}. {d.get('description','')}</div>
+                        <div style="font-weight:700; font-size:15px; color:var(--ink);">{i}. {d.get('description','')}</div>
                     </div>
                     <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:10px;">
                         <span style="font-size:11px; font-weight:700; color:{pc}; background:{pc}18; padding:3px 10px; border-radius:20px;">{priority.upper()}</span>
                         <span style="font-size:11px; font-weight:700; color:{kind_color}; background:{kind_color}18; padding:3px 10px; border-radius:20px;">{kind_label.upper()}</span>
-                        {f"<span style='font-size:11px; font-weight:700; color:#0E7490; background:#0E749018; padding:3px 10px; border-radius:20px;'>&#9201; {days}d</span>" if days is not None else ""}
+                        {f"<span style='font-size:11px; font-weight:700; color:#0E7490; background:#0E749018; padding:3px 10px; border-radius:20px;' class='mono'>&#9201; {days}d</span>" if days is not None else ""}
                     </div>
                     {points_html}
                 </div>
@@ -755,25 +835,25 @@ if analysis:
         dept_scores = analysis.get("departmentScores", {})
         if dept_scores:
             overall = dept_scores.get("overall", {})
-            rec_color = {"Proceed": "#16A34A", "Review Needed": "#D97706", "High Risk": "#DC2626"}.get(overall.get("recommendation"), "#64748B")
+            rec_color = {"Proceed": "#16A34A", "Review Needed": "#D97706", "High Risk": "#DC2626"}.get(overall.get("recommendation"), "var(--text-muted)")
             st.markdown(f"""
-            <div style="background:#FFFFFF; border:1px solid #E2E8F0; border-radius:10px; padding:16px 18px; margin-bottom:14px; box-shadow:0 1px 3px rgba(15,23,42,0.04);">
+            <div style="background:var(--card); border:1px solid var(--border); border-radius:10px; padding:16px 18px; margin-bottom:14px; box-shadow:0 1px 3px rgba(11,17,32,0.04);">
                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
-                    <span style="font-weight:700; font-size:13px; color:#64748B; letter-spacing:0.4px;">OVERALL COMPLIANCE</span>
-                    <span style="font-weight:800; font-size:22px; color:#0F172A;">{overall.get('score','—')}%</span>
+                    <span style="font-weight:700; font-size:13px; color:var(--text-muted); letter-spacing:0.4px;">OVERALL COMPLIANCE</span>
+                    <span style="font-weight:800; font-size:22px; color:var(--ink); font-family:'JetBrains Mono',monospace;">{overall.get('score','—')}%</span>
                     <span style="background:{rec_color}18; color:{rec_color}; padding:3px 12px; border-radius:20px; font-size:12px; font-weight:700;">{overall.get('recommendation','')}</span>
                 </div>
-                <div style="font-size:12.5px; color:#64748B;">{overall.get('summary','')}</div>
+                <div style="font-size:12.5px; color:var(--text-muted);">{overall.get('summary','')}</div>
             </div>
             """, unsafe_allow_html=True)
             cols = st.columns(len(dept_scores.get("byCategory", {})) or 1)
             for i, (cat, s) in enumerate(dept_scores.get("byCategory", {}).items()):
-                rc = {"Proceed": "#16A34A", "Review Needed": "#D97706", "High Risk": "#DC2626"}.get(s.get("recommendation"), "#64748B")
+                rc = {"Proceed": "#16A34A", "Review Needed": "#D97706", "High Risk": "#DC2626"}.get(s.get("recommendation"), "var(--text-muted)")
                 with cols[i]:
                     st.markdown(f"""
-                    <div style="background:#FFFFFF; border:1px solid #E2E8F0; border-radius:10px; padding:12px 10px; text-align:center; box-shadow:0 1px 3px rgba(15,23,42,0.04);">
+                    <div style="background:var(--card); border:1px solid var(--border); border-radius:10px; padding:12px 10px; text-align:center; box-shadow:0 1px 3px rgba(11,17,32,0.04);">
                         <div style="font-size:11px; color:#94A3B8; text-transform:uppercase; font-weight:600; letter-spacing:0.4px;">{s.get('title','')}</div>
-                        <div style="font-size:24px; font-weight:800; color:#0F172A;">{s.get('score','—')}%</div>
+                        <div style="font-size:24px; font-weight:800; color:var(--ink); font-family:'JetBrains Mono',monospace;">{s.get('score','—')}%</div>
                         <div style="font-size:11px; color:{rc}; font-weight:700;">{s.get('recommendation','')}</div>
                     </div>
                     """, unsafe_allow_html=True)
@@ -809,18 +889,18 @@ if analysis:
                     if cite_bits:
                         evidence += f" <span style='color:#94A3B8; font-style:italic;'>({', '.join(cite_bits)})</span>"
                     rows_html += f"""
-                    <tr style="border-bottom:1px solid #E2E8F0;">
-                        <td style="padding:10px 8px; vertical-align:top; font-weight:600; color:#0F172A; width:18%;">{it.get('item','')}</td>
+                    <tr style="border-bottom:1px solid var(--border);">
+                        <td style="padding:10px 8px; vertical-align:top; font-weight:600; color:var(--ink); width:18%;">{it.get('item','')}</td>
                         <td style="padding:10px 8px; vertical-align:top; width:10%;">
                             {status_badge}
                         </td>
-                        <td style="padding:10px 8px; vertical-align:top; width:32%; font-size:13px; color:#334155;">{it.get('reason','')}</td>
-                        <td style="padding:10px 8px; vertical-align:top; width:40%; font-size:12.5px; color:#64748B;">{evidence}</td>
+                        <td style="padding:10px 8px; vertical-align:top; width:32%; font-size:13px; color:var(--text);">{it.get('reason','')}</td>
+                        <td style="padding:10px 8px; vertical-align:top; width:40%; font-size:12.5px; color:var(--text-muted);">{evidence}</td>
                     </tr>"""
                 table_html = f"""
                 <table style="width:100%; border-collapse:collapse;">
                     <thead>
-                        <tr style="border-bottom:2px solid #E2E8F0; text-align:left; font-size:11px; text-transform:uppercase; color:#94A3B8; letter-spacing:0.4px;">
+                        <tr style="border-bottom:2px solid var(--border); text-align:left; font-size:11px; text-transform:uppercase; color:#94A3B8; letter-spacing:0.4px;">
                             <th style="padding:8px;">Checklist Item</th>
                             <th style="padding:8px;">Decision</th>
                             <th style="padding:8px;">Reason</th>
@@ -870,14 +950,14 @@ if analysis:
         risks = analysis.get("risks", []) or []
         col_s, col_r = st.columns(2)
         with col_s:
-            st.markdown("#### \u2705 Strengths")
+            st.markdown("<div style='font-weight:700; font-size:15px; color:var(--ink); margin-bottom:8px;'>\u2705 Strengths</div>", unsafe_allow_html=True)
             if not strengths:
                 st.caption("No strengths returned.")
             for s in strengths:
                 st.markdown(f"**{s.get('point','')}**")
                 st.caption(s.get("note", ""))
         with col_r:
-            st.markdown("#### \u26A0\uFE0F Risks / Weaknesses")
+            st.markdown("<div style='font-weight:700; font-size:15px; color:var(--ink); margin-bottom:8px;'>\u26A0\uFE0F Risks / Weaknesses</div>", unsafe_allow_html=True)
             if not risks:
                 st.caption("No risks returned.")
             for r in risks:
