@@ -61,21 +61,21 @@ def get_deadline_urgency(submission_deadline_iso: str) -> dict:
     this adds zero new API cost.
     """
     if not submission_deadline_iso:
-        return {"days_left": None, "label": "Deadline not extracted from this RFP", "color": "#888888"}
+        return {"days_left": None, "label": "Deadline not extracted from this RFP", "color": "#94A3B8"}
     try:
         deadline = datetime.strptime(submission_deadline_iso, "%Y-%m-%d").date()
     except (ValueError, TypeError):
-        return {"days_left": None, "label": "Could not parse the extracted deadline date", "color": "#888888"}
+        return {"days_left": None, "label": "Could not parse the extracted deadline date", "color": "#94A3B8"}
 
     days_left = (deadline - date.today()).days
     if days_left < 0:
-        return {"days_left": days_left, "label": f"\u26A0\uFE0F Deadline passed ({abs(days_left)} day(s) ago)", "color": "#d6453d"}
+        return {"days_left": days_left, "label": f"\u26A0\uFE0F Deadline passed ({abs(days_left)} day(s) ago)", "color": "#EF4444"}
     elif days_left <= 3:
-        return {"days_left": days_left, "label": f"\U0001F534 Only {days_left} day(s) left!", "color": "#d6453d"}
+        return {"days_left": days_left, "label": f"\U0001F534 Only {days_left} day(s) left!", "color": "#EF4444"}
     elif days_left <= 10:
-        return {"days_left": days_left, "label": f"\U0001F7E1 {days_left} days remaining", "color": "#b7791f"}
+        return {"days_left": days_left, "label": f"\U0001F7E1 {days_left} days remaining", "color": "#F59E0B"}
     else:
-        return {"days_left": days_left, "label": f"\U0001F7E2 {days_left} days remaining", "color": "#1f9d6b"}
+        return {"days_left": days_left, "label": f"\U0001F7E2 {days_left} days remaining", "color": "#10B981"}
 
 
 def get_readiness_status(compliance: list) -> dict:
@@ -96,21 +96,21 @@ def get_readiness_status(compliance: list) -> dict:
             "ready": False,
             "label": f"\u26A0\uFE0F Not ready — {len(blocking)} item(s) still need resolution before submission",
             "blocking_items": blocking,
-            "color": "#d6453d",
+            "color": "#EF4444",
         }
     elif partial_items:
         return {
             "ready": True,
             "label": f"\u2705 Ready for final review — {len(partial_items)} item(s) partially matched, worth a second look",
             "blocking_items": [],
-            "color": "#b7791f",
+            "color": "#F59E0B",
         }
     else:
         return {
             "ready": True,
             "label": "\u2705 All compliance items resolved — ready for final review",
             "blocking_items": [],
-            "color": "#1f9d6b",
+            "color": "#10B981",
         }
 
 
