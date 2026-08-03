@@ -19,7 +19,8 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from checklist_items import CATEGORY_META, CATEGORY_ORDER, DEFAULT_COMPANY_PROFILE, PRIORITY_RANK
-from pdf_reader import extract_text_from_pdf, extract_text_from_documents, PDFExtractionError
+from pdf_reader import extract_text_from_pdf, PDFExtractionError
+from doc_reader import extract_text_from_documents, DocumentExtractionError, SUPPORTED_EXTENSIONS
 from ai_engine import analyze_rfp, QuotaExhaustedError, AnalysisError, generate_question_responses
 from proposal_builder import build_proposal_docx
 from insights import (
@@ -247,18 +248,42 @@ div[data-testid="stMetricValue"] {
 }
 
 /* ---- Expanders ---- */
+/* Streamlit's expander header/body text uses its own default (light-theme)
+   color regardless of our background — we painted the background dark but
+   never forced the text, so text stayed dark-on-dark. Also target the
+   nested summary/details/content elements defensively, in case the actual
+   painted surface is a child node rather than the outer wrapper. */
+div[data-testid="stExpander"],
+div[data-testid="stExpander"] details,
+div[data-testid="stExpander"] summary,
+div[data-testid="stExpander"] div[data-testid="stExpanderDetails"] {
+    background: var(--card) !important;
+}
 div[data-testid="stExpander"] {
-    background: var(--card);
     border: 1px solid var(--border) !important; border-radius: 8px !important;
 }
+div[data-testid="stExpander"] * { color: var(--text) !important; }
+
 /* Sidebar expanders (Company Profile, History) sit on the permanently-dark
    sidebar, so they use the fixed sidebar tones, not var(--card) — otherwise
    they'd flip to a light-mode white box even while Dark Mode is on, which
-   is exactly the washed-out "light box in a dark sidebar" bug this fixes. */
-section[data-testid="stSidebar"] div[data-testid="stExpander"] {
+   is exactly the washed-out "light box in a dark sidebar" bug this fixes.
+   These selectors are MORE specific than the general rules above (extra
+   sidebar ancestor requirement), so they always win regardless of source
+   order — they don't depend on being written after the general rule. */
+section[data-testid="stSidebar"] div[data-testid="stExpander"],
+section[data-testid="stSidebar"] div[data-testid="stExpander"] details,
+section[data-testid="stSidebar"] div[data-testid="stExpander"] summary,
+section[data-testid="stSidebar"] div[data-testid="stExpander"] div[data-testid="stExpanderDetails"] {
     background: var(--ink-soft) !important;
+}
+section[data-testid="stSidebar"] div[data-testid="stExpander"] {
     border: 1px solid var(--ink-line) !important;
 }
+/* Higher specificity than both the general expander text rule above and the
+   sidebar's blanket text rule below, so this always wins on its own merit —
+   not dependent on which one happens to be written later in the file. */
+section[data-testid="stSidebar"] div[data-testid="stExpander"] * { color: #E2E8F0 !important; }
 
 /* ---- Misc ---- */
 hr { margin: 1.2rem 0; }
@@ -536,9 +561,9 @@ with upload_card:
     col_upload, col_sample = st.columns([3, 1])
     with col_upload:
         uploaded_files = st.file_uploader(
-            "Upload this RFP's documents (PDF) — main RFP + any Exhibits/Attachments, "
-            "select all of them together",
-            type=["pdf"], accept_multiple_files=True,
+            "Upload this RFP's documents (PDF, Word, CSV, or TXT) — main RFP + any "
+            "Exhibits/Attachments, select all of them together",
+            type=SUPPORTED_EXTENSIONS, accept_multiple_files=True,
         )
     with col_sample:
         st.write("")
@@ -569,7 +594,7 @@ elif uploaded_files:
     try:
         pending_text, pending_docs = extract_text_from_documents(uploaded_files)
         pending_label = pending_docs[0] if len(pending_docs) == 1 else ", ".join(pending_docs)
-    except PDFExtractionError as e:
+    except DocumentExtractionError as e:
         st.error(str(e))
 
 if pending_text:
