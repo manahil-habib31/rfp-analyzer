@@ -13,6 +13,7 @@ OpenAI call.
 
 import os
 import json
+import base64
 from datetime import datetime
 
 import streamlit as st
@@ -313,10 +314,116 @@ if "current_history_id" not in st.session_state:
     st.session_state.current_history_id = None  # which history_store row the active analysis was saved as
 if "dark_mode" not in st.session_state:
     st.session_state.dark_mode = False
+if "doc_bytes" not in st.session_state:
+    st.session_state.doc_bytes = {}  # {filename: raw_bytes} for the currently-loaded RFP's source files, used by the reference viewer
 
 STATUS_BADGE = {"GO": "\U0001F7E2 GO", "NO-GO": "\U0001F534 NO-GO", "REVIEW": "\u26AA REVIEW"}
 TAG_BADGE = {"GO": "\U0001F7E2 GO", "CONDITIONAL": "\U0001F7E1 CONDITIONAL", "NO-GO": "\U0001F534 NO-GO"}
 SEVERITY_BADGE = {"HIGH": "\U0001F534 HIGH", "MEDIUM": "\U0001F7E1 MEDIUM", "LOW": "\u26AA LOW"}
+
+
+# ---------------------------------------------------------------------------
+# Reference viewer — lets a person click a docRef/pageRef citation anywhere
+# in the analysis and jump straight to that source page, instead of only
+# reading "(RFP_Exhibit_A.pdf, Page 3)" as inert text and having to go dig
+# through the original file by hand.
+#
+# HOW THE CLICK WORKS: a real st.button (not an HTML <a href> link). An
+# earlier version used a plain link with query params, which caused an
+# actual browser page navigation/reload on click — and reloading the page
+# always clears whatever file was sitting in the uploader (browsers never
+# preserve <input type="file"> selections across a reload, framework-
+# independent) and can reset Streamlit's session state entirely. A button
+# click, by contrast, is a normal Streamlit rerun on the SAME session/
+# WebSocket connection — st.session_state.doc_bytes stays intact.
+#
+# WHY page-jump is PDF-only: browsers' built-in PDF viewers understand the
+# "#page=N" URL fragment natively — plain text/CSV/Word files have no
+# equivalent standard. For those, the modal instead shows that document's
+# full extracted text, since there's no meaningful "page" to jump to.
+#
+# LIMITATION (documented, not a bug): source bytes are only kept for the RFP
+# currently loaded this session (st.session_state.doc_bytes) — they are NOT
+# saved into history_store.py (same reasoning as analyzed_rfp_text: keeping
+# every uploaded file's raw bytes in the history database indefinitely would
+# bloat it for little benefit). Viewing a reference from a reloaded History
+# entry will say so plainly rather than silently showing nothing.
+# ---------------------------------------------------------------------------
+def _get_doc_text(doc_name: str):
+    """Recovers one document's extracted text from the already-combined RFP
+    text for the CURRENT analysis, by splitting on the same
+    "--- Document: X ---" marker doc_reader.py inserts — avoids needing a
+    second copy of each document's text stored separately."""
+    full_text = st.session_state.get("analyzed_rfp_text", "") or ""
+    marker = f"--- Document: {doc_name} ---\n"
+    if marker not in full_text:
+        return None
+    start = full_text.index(marker) + len(marker)
+    next_marker_pos = full_text.find("--- Document: ", start)
+    return full_text[start:next_marker_pos].strip() if next_marker_pos != -1 else full_text[start:].strip()
+
+
+@st.dialog("\U0001F4C4 Source Reference", width="large")
+def _show_reference_dialog(doc_name: str, page_ref: str):
+    st.caption(f"**{doc_name}**" + (f"  ·  {page_ref}" if page_ref else ""))
+    raw = st.session_state.get("doc_bytes", {}).get(doc_name)
+
+    if raw and doc_name.lower().endswith(".pdf"):
+        b64 = base64.b64encode(raw).decode()
+        page_num = "".join(ch for ch in (page_ref or "") if ch.isdigit()) or "1"
+        st.markdown(
+            f'<iframe src="data:application/pdf;base64,{b64}#page={page_num}" '
+            f'width="100%" height="600" style="border:1px solid var(--border); border-radius:8px;"></iframe>',
+            unsafe_allow_html=True,
+        )
+    elif raw:
+        st.info("Page-level jump only works for PDFs — showing this document's full extracted text instead.")
+        st.text_area("Extracted text", value=_get_doc_text(doc_name) or "(text unavailable)", height=500, disabled=True)
+    else:
+        st.warning(
+            "The original file isn't available to view — this happens when an analysis was "
+            "reloaded from History (only the analysis result is saved, not the source file). "
+            "Re-upload this RFP in the main uploader to view its source pages."
+        )
+
+
+def _ref_caption(doc_ref, section_ref=None, page_ref=None) -> str:
+    """Plain (non-clickable) citation text, e.g. '(RFP.pdf, Page 3)' — used
+    inline within the big HTML card strings, where a real st.button can't
+    live. The actual clickable "View source" button is rendered separately,
+    right after the card, via _ref_button() below."""
+    bits = [r for r in (doc_ref, section_ref, page_ref) if r]
+    if not bits:
+        return ""
+    return f" <span style='color:#94A3B8; font-size:11px; font-style:italic;'>({', '.join(bits)})</span>"
+
+
+def _ref_button(label: str, doc_ref, page_ref, key: str):
+    """A real Streamlit button that opens the reference dialog — stays on
+    the same session (see module-level note above on why this replaced the
+    earlier <a href> approach). Renders nothing if there's no doc_ref."""
+    if not doc_ref:
+        return
+    if st.button(f"\U0001F4C4 {label}", key=key):
+        _show_reference_dialog(doc_ref, page_ref)
+
+
+def _flatten_html(html: str) -> str:
+    """Strips per-line leading/trailing whitespace from a multi-line HTML
+    template, joining with single spaces. REQUIRED before passing any
+    multi-line, Python-indented f-string HTML to st.markdown(): Streamlit's
+    markdown renderer (built on the same rules as the Python-Markdown
+    library) treats 4-or-more leading spaces on a line as an INDENTED CODE
+    BLOCK — it silently HTML-escapes that content and displays the raw tags
+    as literal text instead of rendering them, rather than raising any kind
+    of error. Writing an HTML template with the same indentation as the
+    surrounding Python code (for readability in the .py file) is exactly
+    what triggers this. This is safe to apply even to templates that
+    contain NESTED pre-built HTML strings (e.g. a table's rows_html spliced
+    into a table_html wrapper) since it operates on the final combined
+    string's lines regardless of how deep the original nesting was."""
+    return " ".join(line.strip() for line in html.splitlines() if line.strip())
+
 
 
 def build_markdown_report(analysis: dict, source_label: str) -> str:
@@ -588,12 +695,21 @@ if use_sample:
         pending_text = extract_text_from_pdf(sample_path)
         pending_label = "sample_rfp.pdf"
         pending_docs = ["sample_rfp.pdf"]
+        with open(sample_path, "rb") as fh:
+            st.session_state.doc_bytes = {"sample_rfp.pdf": fh.read()}
     except PDFExtractionError as e:
         st.error(str(e))
 elif uploaded_files:
     try:
         pending_text, pending_docs = extract_text_from_documents(uploaded_files)
         pending_label = pending_docs[0] if len(pending_docs) == 1 else ", ".join(pending_docs)
+        # Grab the raw bytes now, before any downstream extraction consumes
+        # the stream further — .getvalue() doesn't move the read position,
+        # so this doesn't interfere with extract_text_from_documents() above.
+        # Reset (not merge) on every new upload batch — stale bytes from a
+        # PREVIOUS RFP under the same filename would show the wrong source
+        # document if left around.
+        st.session_state.doc_bytes = {f.name: f.getvalue() for f in uploaded_files}
     except DocumentExtractionError as e:
         st.error(str(e))
 
@@ -676,6 +792,11 @@ if analysis:
             f"<div style='font-size:13.5px; color:var(--text-muted); margin-bottom:14px;'>{banner_msg}</div>",
             unsafe_allow_html=True,
         )
+
+        if analysis.get("extractionWarnings"):
+            st.warning(
+                "\u26A0\uFE0F " + "\n\n".join(analysis["extractionWarnings"])
+            )
 
         if analysis.get("complianceWarnings"):
             st.warning(
@@ -819,20 +940,22 @@ if analysis:
             pc = PRIORITY_COLOR.get(priority, "var(--text-muted)")
 
             points_html = ""
+            points_with_refs = []  # (label, doc_ref, page_ref) — rendered as real buttons after the card
             for j, p in enumerate(d.get("points", []) or [], start=1):
                 point_text = p.get("point", "") if isinstance(p, dict) else str(p)
                 doc_ref = p.get("docRef") if isinstance(p, dict) else None
                 section_ref = p.get("sectionRef") if isinstance(p, dict) else None
                 page_ref = p.get("pageRef") if isinstance(p, dict) else None
-                ref_bits = [r for r in (doc_ref, section_ref, page_ref) if r]
-                ref_str = f" <span style='color:#94A3B8; font-size:11px; font-style:italic;'>({', '.join(ref_bits)})</span>" if ref_bits else ""
+                ref_str = _ref_caption(doc_ref, section_ref, page_ref)
+                if doc_ref:
+                    points_with_refs.append((f"{i}.{j}", doc_ref, page_ref))
                 points_html += (
                     f"<div style='padding:4px 0; font-size:13.5px; color:var(--text);'>"
                     f"<b style='color:var(--ink);'>{i}.{j}</b>&nbsp; {point_text}{ref_str}</div>"
                 )
 
             st.markdown(
-                f"""
+                _flatten_html(f"""
                 <div style="background:var(--card); border:1px solid var(--border); border-radius:10px;
                             padding:16px 18px; margin-bottom:12px; box-shadow:0 1px 3px rgba(11,17,32,0.04);">
                     <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:10px; margin-bottom:8px;">
@@ -845,9 +968,17 @@ if analysis:
                     </div>
                     {points_html}
                 </div>
-                """,
+                """),
                 unsafe_allow_html=True,
             )
+            if points_with_refs:
+                chunk_size = 4
+                for start in range(0, len(points_with_refs), chunk_size):
+                    chunk = points_with_refs[start:start + chunk_size]
+                    ref_cols = st.columns(chunk_size)
+                    for col, (label, doc_ref, page_ref) in zip(ref_cols, chunk):
+                        with col:
+                            _ref_button(label, doc_ref, page_ref, key=f"refbtn_deliv_{i}_{label}")
 
     with tabs[1]:
         criteria = analysis.get("evaluationCriteria", []) or []
@@ -861,7 +992,7 @@ if analysis:
         if dept_scores:
             overall = dept_scores.get("overall", {})
             rec_color = {"Proceed": "#16A34A", "Review Needed": "#D97706", "High Risk": "#DC2626"}.get(overall.get("recommendation"), "var(--text-muted)")
-            st.markdown(f"""
+            st.markdown(_flatten_html(f"""
             <div style="background:var(--card); border:1px solid var(--border); border-radius:10px; padding:16px 18px; margin-bottom:14px; box-shadow:0 1px 3px rgba(11,17,32,0.04);">
                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
                     <span style="font-weight:700; font-size:13px; color:var(--text-muted); letter-spacing:0.4px;">OVERALL COMPLIANCE</span>
@@ -870,18 +1001,18 @@ if analysis:
                 </div>
                 <div style="font-size:12.5px; color:var(--text-muted);">{overall.get('summary','')}</div>
             </div>
-            """, unsafe_allow_html=True)
+            """), unsafe_allow_html=True)
             cols = st.columns(len(dept_scores.get("byCategory", {})) or 1)
             for i, (cat, s) in enumerate(dept_scores.get("byCategory", {}).items()):
                 rc = {"Proceed": "#16A34A", "Review Needed": "#D97706", "High Risk": "#DC2626"}.get(s.get("recommendation"), "var(--text-muted)")
                 with cols[i]:
-                    st.markdown(f"""
+                    st.markdown(_flatten_html(f"""
                     <div style="background:var(--card); border:1px solid var(--border); border-radius:10px; padding:12px 10px; text-align:center; box-shadow:0 1px 3px rgba(11,17,32,0.04);">
                         <div style="font-size:11px; color:#94A3B8; text-transform:uppercase; font-weight:600; letter-spacing:0.4px;">{s.get('title','')}</div>
                         <div style="font-size:24px; font-weight:800; color:var(--ink); font-family:'JetBrains Mono',monospace;">{s.get('score','—')}%</div>
                         <div style="font-size:11px; color:{rc}; font-weight:700;">{s.get('recommendation','')}</div>
                     </div>
-                    """, unsafe_allow_html=True)
+                    """), unsafe_allow_html=True)
             st.caption("Scores are computed directly from the checklist below (GO=100, REVIEW=50, NO-GO=0, averaged per department) — not separately judged by the AI, so they're always consistent with the detailed results.")
 
         STATUS_COLOR = {"GO": "#16A34A", "NO-GO": "#DC2626", "REVIEW": "#7C3AED"}
@@ -900,6 +1031,7 @@ if analysis:
                 if not cat_items:
                     st.caption(f"No items with status '{filter_choice}' in this category.")
                 rows_html = ""
+                items_with_refs = []  # (item_name, doc_ref, page_ref) — rendered as real buttons after the table
                 for it in cat_items:
                     status = it.get("status", "REVIEW")
                     color = STATUS_COLOR.get(status, "#7C3AED")
@@ -910,9 +1042,9 @@ if analysis:
                     if it.get("overridden"):
                         status_badge += "<br><span style='font-size:9px; color:#2563EB; font-weight:700;'>\u270f\uFE0F MANUALLY OVERRIDDEN</span>"
                     evidence = it.get("evidence") or "<span style='color:#94A3B8;'>Not cited in RFP</span>"
-                    cite_bits = [r for r in (it.get("docRef"), it.get("pageRef")) if r]
-                    if cite_bits:
-                        evidence += f" <span style='color:#94A3B8; font-style:italic;'>({', '.join(cite_bits)})</span>"
+                    evidence += _ref_caption(it.get("docRef"), page_ref=it.get("pageRef"))
+                    if it.get("docRef"):
+                        items_with_refs.append((it.get("item", "?"), it.get("docRef"), it.get("pageRef")))
                     rows_html += f"""
                     <tr style="border-bottom:1px solid var(--border);">
                         <td style="padding:10px 8px; vertical-align:top; font-weight:600; color:var(--ink); width:18%;">{it.get('item','')}</td>
@@ -934,7 +1066,17 @@ if analysis:
                     </thead>
                     <tbody>{rows_html}</tbody>
                 </table>"""
-                st.markdown(table_html, unsafe_allow_html=True)
+                st.markdown(_flatten_html(table_html), unsafe_allow_html=True)
+
+                if items_with_refs:
+                    st.caption("View source:")
+                    chunk_size = 4
+                    for start in range(0, len(items_with_refs), chunk_size):
+                        chunk = items_with_refs[start:start + chunk_size]
+                        ref_cols = st.columns(chunk_size)
+                        for col, (item_name, doc_ref, page_ref) in zip(ref_cols, chunk):
+                            with col:
+                                _ref_button(item_name, doc_ref, page_ref, key=f"refbtn_comp_{cat}_{item_name}")
 
                 # Human override — pick an item in THIS category and correct its
                 # status. Every downstream view (this tab, Quick Insights, exports)
@@ -1045,9 +1187,9 @@ if analysis:
                 "— separate from the fixed compliance checklist."
             )
             for i, q in enumerate(questions, start=1):
-                ref_bits = [r for r in (q.get("docRef"), q.get("sectionRef"), q.get("pageRef")) if r]
-                ref_str = f" <span style='color:#94A3B8; font-size:11px; font-style:italic;'>({', '.join(ref_bits)})</span>" if ref_bits else ""
+                ref_str = _ref_caption(q.get("docRef"), q.get("sectionRef"), q.get("pageRef"))
                 st.markdown(f"**Q{i}.** {q.get('question','')}{ref_str}", unsafe_allow_html=True)
+                _ref_button("View source", q.get("docRef"), q.get("pageRef"), key=f"refbtn_q_{i}")
 
             st.divider()
 

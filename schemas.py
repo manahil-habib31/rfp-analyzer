@@ -1,14 +1,13 @@
 """
 schemas.py
 
-Strict Pydantic schema for the analysis response. Passing this to Gemini as
-`response_schema` (alongside response_mime_type="application/json") makes the
-API *structurally* constrain its output to this shape — this is stronger than
-just describing the desired JSON in the prompt text, which is what caused the
-compliance checklist to come back empty/misshapen in earlier testing: the
-model answered everything else correctly but didn't reliably match the
-free-text-described shape for the largest, most repetitive part of the
-response.
+Strict Pydantic schema for the analysis response. Passing this to the model as
+`response_format` (structured outputs) makes the API *structurally* constrain
+its output to this shape — this is stronger than just describing the desired
+JSON in the prompt text, which is what caused the compliance checklist to come
+back empty/misshapen in earlier testing: the model answered everything else
+correctly but didn't reliably match the free-text-described shape for the
+largest, most repetitive part of the response.
 """
 
 from typing import List, Optional, Literal
@@ -34,12 +33,21 @@ class Deliverable(BaseModel):
     """A parent deliverable (e.g. 'Insurance Documentation') expanded into its own
     child requirement/description points (e.g. 'Certificate required', 'Coverage
     $5M', 'Valid through contract period') — a flat two-level list, not grouped
-    by department."""
+    by department.
+
+    min_length=2 on points (NOT 1) is deliberate: the system prompt tells the
+    model to give each deliverable "2-6 child items", but a *structured-output*
+    schema is what the API actually enforces — prose guidance in the prompt is
+    only a suggestion the model can (and under token/effort pressure, will)
+    ignore. Leaving this at min_length=1 meant the schema's real floor was
+    exactly the failure mode being reported (only one point per deliverable),
+    regardless of what the prompt asked for. Setting it to 2 makes the
+    prompt's own stated minimum an actual hard constraint."""
     description: str
     mandatory: bool
     estimatedDays: Optional[int] = None
     priority: Literal["High", "Medium", "Low"] = "Medium"
-    points: List[DeliverablePoint] = Field(default_factory=list, min_length=1)
+    points: List[DeliverablePoint] = Field(default_factory=list, min_length=2)
 
 
 class Criterion(BaseModel):
@@ -131,9 +139,9 @@ class RFPCoreAnalysis(BaseModel):
 class ComplianceChecklist(BaseModel):
     """The full checklist in one shape — kept for backward-compat/testing,
     but NOT used for the live API call anymore: a fixed length of 35 nested
-    objects is too large a constraint grammar for Gemini's controlled
-    generation to serve ("too many states" error). See
-    build_category_checklist_schema below for the schema actually used."""
+    objects is too large a constraint grammar for some providers' controlled
+    generation to serve reliably. See build_category_checklist_schema below
+    for the schema actually used."""
     items: List[ComplianceItem] = Field(min_length=_ITEM_COUNT, max_length=_ITEM_COUNT)
 
 
@@ -142,7 +150,7 @@ def build_category_checklist_schema(count: int):
     Dynamically builds a small, category-scoped checklist schema with an
     exact-length constraint of `count` items. Splitting the 35-item checklist
     into 4 per-department calls (6/13/11/5 items) keeps each call's
-    constraint grammar small enough for Gemini to actually serve, while still
+    constraint grammar small enough to actually serve reliably, while still
     guaranteeing an exact item count per call.
     """
     return create_model(

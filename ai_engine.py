@@ -5,7 +5,8 @@ Sends the RFP text + company profile to OpenAI and gets back a strict JSON
 analysis: verdict, deliverables, evaluation criteria, a checklist-item-by-item
 compliance breakdown, key dates/budget, and a risk assessment.
 
-:
+Design notes (matching the pattern used elsewhere in SPS's internship
+projects):
 - Structured JSON output (OpenAI's "structured outputs" via the
   `beta.chat.completions.parse` helper + a Pydantic response_format) rather
   than free-text parsing, so scores/counts/badges are computed, not guessed.
@@ -39,6 +40,18 @@ MAX_RETRIES = 4
 INITIAL_BACKOFF_SECONDS = 2
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
+# gpt-4o-mini has a 128K-token context window (~500K+ characters for English
+# text). The previous 120,000-character cap only used a fraction of that and
+# was silently dropping the END of longer multi-document RFPs (main RFP +
+# several exhibits) — any deliverable, checklist evidence, or question that
+# only appeared past that cutoff was invisible to the model, which is a very
+# plausible cause of "fewer deliverables than expected": the model can't
+# extract what it never received. 400,000 characters (~100K tokens) leaves
+# comfortable headroom for the system prompt (~1-2K tokens) plus the
+# response's own output budget (up to 16,384 tokens for the core call)
+# within the 128K window.
+MAX_RFP_CHARS = 400_000
 
 
 class QuotaExhaustedError(Exception):
@@ -244,13 +257,10 @@ def _call_openai_with_retry(client, system_prompt: str, rfp_text: str, response_
                 model=MODEL_NAME,
                 messages=[
                     {"role": "system", "content": system_prompt},
-                    # 120,000 chars (~30k tokens) comfortably fits a main RFP plus several
-                    # exhibit/attachment documents combined. The old 16,000-char limit was
-                    # fine for a single RFP but was silently cutting off later documents
-                    # (and their "--- Document: X, Page N ---" markers) once multiple files
-                    # were combined, which is why docRef was never showing up for
-                    # multi-document RFPs.
-                    {"role": "user", "content": "RFP TEXT:\n\n" + rfp_text[:120000]},
+                    # See MAX_RFP_CHARS definition above for why this is
+                    # 400,000 chars, not the earlier, needlessly conservative
+                    # 120,000 — this model's context window supports far more.
+                    {"role": "user", "content": "RFP TEXT:\n\n" + rfp_text[:MAX_RFP_CHARS]},
                 ],
                 response_format=response_schema,
                 max_tokens=current_max_tokens,
@@ -509,6 +519,18 @@ def analyze_rfp(rfp_text: str, company_profile: dict, api_key: str, doc_names: l
 
     client = OpenAI(api_key=api_key, base_url=OPENROUTER_BASE_URL)
 
+    # Surfaced to the UI (analysis["extractionWarnings"]) rather than just
+    # silently truncating — a silent truncation is exactly what makes
+    # "why did I get fewer deliverables than expected" hard to diagnose.
+    extraction_warnings = []
+    if len(rfp_text) > MAX_RFP_CHARS:
+        extraction_warnings.append(
+            f"This RFP's combined text is {len(rfp_text):,} characters — only the first "
+            f"{MAX_RFP_CHARS:,} were sent to the model. Content past that point (later pages "
+            f"or exhibits) wasn't seen, so deliverables/questions/evidence from there won't "
+            f"appear in this analysis."
+        )
+
     # --- Call 1: core analysis ---
     core_prompt = _build_core_system_prompt(company_profile, doc_names)
     core_result = _call_openai_with_retry(client, core_prompt, rfp_text, RFPCoreAnalysis, max_output_tokens=16384)
@@ -563,6 +585,9 @@ def analyze_rfp(rfp_text: str, company_profile: dict, api_key: str, doc_names: l
     except (QuotaExhaustedError, AnalysisError) as e:
         data["proposalOutline"] = {"sections": []}
         data["outlineWarning"] = str(e)
+
+    if extraction_warnings:
+        data["extractionWarnings"] = extraction_warnings
 
     return data
 
