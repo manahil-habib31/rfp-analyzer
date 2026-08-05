@@ -17,11 +17,29 @@ Both thresholds are read from the company profile (not hard-coded), so
 they're configurable per the sidebar rather than fixed in code — a company
 with different policy limits just edits the profile, no code changes needed.
 
-This runs *after* the AI call and checklist merge, as a final deterministic
-pass: it overwrites the "Payment Terms" and "Insurance Requirements" checklist
-rows with a rule-based status/reason, and adjusts the overall verdict tag if
-either threshold is breached, since those two outcomes are policy, not
-opinion.
+SPLIT INTO TWO PHASES (this used to be one function, apply_hard_rules,
+called after department scores were already computed):
+  1. correct_compliance_items() — overwrites the "Payment Terms" and
+     "Insurance Requirements" checklist rows with a rule-based status/
+     reason. Must run BEFORE scoring.compute_scores(), not after — running
+     it after (the original bug) meant the department score breakdown and
+     its "fails for: X, Y, Z" summary text got computed from the AI's raw,
+     pre-correction judgment, while the checklist table shown right below
+     it displayed the corrected status. Both come from the same
+     data["compliance"] list, so a viewer would see the checklist row say
+     "Payment Terms: GO" while the department summary above it says
+     "fails for: Payment Terms" — a direct, visible contradiction, and
+     exactly the kind of thing that erodes trust in an audit tool.
+  2. apply_verdict_tag_override() — forces the FINAL blended verdict tag/
+     score if either threshold was breached. This one genuinely does need
+     to run AFTER ai_engine.compute_final_verdict(), since it overrides
+     that blended {tag, score, summary} shape, which doesn't exist yet
+     any earlier in the pipeline.
+
+apply_hard_rules() is kept as a combined convenience wrapper (calls both
+phases back to back) for any caller that doesn't care about the ordering
+subtlety — but ai_engine.py's analyze_rfp() calls the two phases
+separately, at the two different correct points in its pipeline.
 """
 
 
@@ -32,10 +50,15 @@ def _find_item(compliance_list: list, item_name: str):
     return None
 
 
-def apply_hard_rules(data: dict, company_profile: dict) -> dict:
+def correct_compliance_items(data: dict, company_profile: dict) -> dict:
+    """Phase 1: corrects the Payment Terms / Insurance Requirements checklist
+    rows in data["compliance"] against the company profile's thresholds.
+    Stores which forced tag (if any) this implies in
+    data["_forced_verdict_tag"] for apply_verdict_tag_override() to pick up
+    later — does NOT touch data["verdict"] itself, since at this point in
+    the pipeline the blended verdict doesn't exist yet."""
     kdb = data.get("keyDatesBudget", {}) or {}
     compliance = data.get("compliance", []) or []
-    verdict = data.get("verdict", {}) or {}
 
     forced_tag = None  # set if a hard threshold breach must override the AI's overall tag
 
@@ -87,6 +110,62 @@ def apply_hard_rules(data: dict, company_profile: dict) -> dict:
             insurance_item["evidence"] = f"RFP states required insurance coverage of ${insurance_amount:,.0f}."
             forced_tag = "NO-GO"  # insurance breach is the harder rule, takes priority over a payment-terms escalation
 
+    data["compliance"] = compliance
+    forced_tag = _catch_missed_insurance_nogo(data, forced_tag, insurance_item)
+    data["_forced_verdict_tag"] = forced_tag
+    return data
+
+
+def _catch_missed_insurance_nogo(data: dict, forced_tag, insurance_item=None):
+    """Safety net for exactly the gap that produced a wrong GO verdict on
+    26-ODU-30-JNH: the Legal-category checklist item ("Insurance Coverage")
+    correctly found "$1,000,000 combined single limits" directly in the RFP
+    text and flagged NO-GO — but Rule 2 above only reads
+    keyDatesBudget.insuranceAmountUSD, which came back empty from a
+    DIFFERENT AI call over the same document. Because that field was empty,
+    Rule 2 fell through to REVIEW instead of NO-GO, and the real NO-GO
+    signal the model already found elsewhere in the checklist never reached
+    the top-level verdict.
+
+    This scans every OTHER compliance item (any department, not just the
+    one named "Insurance Requirements") for anything with "insurance" in
+    its name that the AI itself already marked NO-GO, and — if Rule 2
+    hasn't already forced NO-GO — escalates the verdict using that item's
+    own evidence. It leaves the OTHER item's own status/reason untouched
+    (that one's already correct), but DOES update the primary
+    "Insurance Requirements" row to cross-reference it — otherwise the
+    verdict would say NO-GO while that row still says REVIEW, exactly the
+    same kind of visible self-contradiction the phase-1/phase-2 split above
+    was designed to prevent for Payment Terms/Insurance in the first
+    place."""
+    if forced_tag == "NO-GO":
+        return forced_tag
+    for item in data.get("compliance", []) or []:
+        name = (item.get("item") or "").lower()
+        if "insurance" in name and item.get("status") == "NO-GO":
+            if insurance_item is not None and insurance_item is not item:
+                insurance_item["status"] = "NO-GO"
+                insurance_item["reason"] = (
+                    f"No insurance dollar amount was extracted for this rule directly, but "
+                    f"'{item.get('item')}' elsewhere in the checklist found and flagged this "
+                    f"as NO-GO from the RFP text — escalating here too rather than leaving "
+                    f"this row as REVIEW while the overall verdict reflects NO-GO."
+                )
+                insurance_item["evidence"] = item.get("evidence")
+            return "NO-GO"
+    return forced_tag
+
+
+def apply_verdict_tag_override(data: dict) -> dict:
+    """Phase 2: forces the FINAL blended verdict tag/score if
+    correct_compliance_items() (phase 1, run earlier) flagged a threshold
+    breach. Must run after ai_engine.compute_final_verdict() has already
+    set data["verdict"] to the blended {tag, score, summary, breakdown}
+    shape — reads data["_forced_verdict_tag"] rather than recomputing
+    anything, so it can't disagree with what phase 1 already decided."""
+    forced_tag = data.pop("_forced_verdict_tag", None)
+    verdict = data.get("verdict", {}) or {}
+
     if forced_tag is not None:
         original_tag = verdict.get("tag")
         should_override = (
@@ -117,5 +196,14 @@ def apply_hard_rules(data: dict, company_profile: dict) -> dict:
                     verdict["score"] = 69 if score >= 70 else 40
 
     data["verdict"] = verdict
-    data["compliance"] = compliance
+    return data
+
+
+def apply_hard_rules(data: dict, company_profile: dict) -> dict:
+    """Combined convenience wrapper (both phases back to back) — kept for
+    any caller that doesn't need the two-phase ordering. ai_engine.py's
+    analyze_rfp() does NOT use this; it calls the two phases separately at
+    the correct points in its pipeline (see the module docstring above)."""
+    data = correct_compliance_items(data, company_profile)
+    data = apply_verdict_tag_override(data)
     return data

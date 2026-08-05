@@ -6,6 +6,7 @@ Integrates Phase 6 (AI Generated Answers) directly into Phase 7 (Proposal Outlin
 and exports an enterprise-ready Microsoft Word (.docx) document without empty placeholders.
 """
 
+import re
 from typing import List, Dict, Any, Optional
 from types import SimpleNamespace
 import io
@@ -31,6 +32,54 @@ def set_cell_background(cell, fill_hex: str):
     tcPr.append(shd)
 
 
+# ---------------------------------------------------------------------------
+# Question-to-section matching
+#
+# PREVIOUS APPROACH (removed): a hand-maintained keyword dict where a
+# category (e.g. "pricing" -> ["price","cost","financial",...]) only even
+# got CHECKED if the category name literally appeared as a substring in the
+# section's own title (`if rule_key in child_title_lower`). Real outline
+# titles are AI-generated and specific ("Unified Search Experience",
+# "AI-Enhanced Search Capabilities") — they essentially never contain a
+# generic category word like "approach" or "scope" verbatim, so most
+# sections never even reached the keyword check and fell through to the
+# generic boilerplate fallback. Worse, a single overly-generic keyword
+# (e.g. "schedule" under "pricing") could false-positive match a completely
+# unrelated question ("What training and support will you provide
+# post-implementation?" landed in "Pricing Structure" this way).
+#
+# NEW APPROACH: score every (question, section) pair by how many
+# significant words they actually share, and assign each question to
+# whichever section scores highest — no reliance on a category name
+# appearing literally anywhere. This is directly tied to the real words in
+# the real title/question rather than a keyword list that can never cover
+# every phrasing. A question only ever lands in ONE section (its best
+# match), and anything that scores 0 everywhere (no shared words at all)
+# is NOT silently dropped — it's collected into a final "Additional
+# Requirements & Responses" appendix, so a low-confidence or unmatchable
+# question still makes it into the document instead of vanishing.
+# ---------------------------------------------------------------------------
+_STOPWORDS = {
+    "the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "with", "will",
+    "you", "your", "what", "how", "why", "when", "where", "describe", "provide",
+    "is", "are", "be", "this", "that", "it", "as", "by", "we", "our", "their",
+    "they", "proposal", "response", "please", "explain", "which", "do", "does",
+    "should", "would", "any", "all", "each", "if", "not", "have", "has", "can",
+}
+
+
+def _significant_words(text: str) -> set:
+    words = re.findall(r"[a-z]+", (text or "").lower())
+    # >= 2 chars (not > 2) so short domain terms like "AI", "ML", "IT" survive —
+    # every short word that would otherwise be noise (an, by, to, in, on, is,
+    # be, it, as, we, ...) is already covered by _STOPWORDS above.
+    return {w for w in words if len(w) >= 2 and w not in _STOPWORDS}
+
+
+def _match_score(question_words: set, title_words: set) -> int:
+    return len(question_words & title_words)
+
+
 # --- 1. Assembly Engine: Direct Mapping & Population ---
 def assemble_proposal_content(
     outline: ProposalOutline,
@@ -39,49 +88,65 @@ def assemble_proposal_content(
     company_name: str = "SPS"
 ) -> List[Dict[str, Any]]:
     """
-    Merges AI responses into matching outline sections based on titles and tags.
+    Merges AI responses into matching outline sections based on shared
+    significant words between each question and each section title.
     Eliminates empty placeholder tags by generating context-aware fallback text.
+    Anything that can't be confidently matched anywhere lands in a final
+    "Additional Requirements & Responses" appendix rather than being lost.
     """
-    
-    # Keyword mapping dictionary to auto-route questions into the right outline sections
-    section_mapping_rules = {
-        "cover": ["cover", "title"],
-        "transmittal": ["transmittal", "letter", "executive summary"],
-        "scope": ["scope", "subscription", "services", "requirement", "identity", "cloud"],
-        "qualifications": ["qualification", "experience", "similar projects", "background", "track record"],
-        "approach": ["technical approach", "methodology", "architecture", "iam", "implementation"],
-        "management": ["project management", "support", "maintenance", "sla", "monitoring", "operations"],
-        "staffing": ["staffing", "team", "personnel", "roles", "engineers"],
-        "references": ["reference", "case study", "portfolio", "past performance"],
-        "pricing": ["price", "cost", "financial", "commercial", "budget", "schedule"],
-        "compliance": ["affidavit", "attachment", "legal", "compliance", "federal", "form"]
+    # --- Pass 1: score every question against every (section, child), and
+    # assign each question to its single best-scoring match (score must be
+    # > 0 — no shared words means no assignment, not a forced guess). ---
+    flat_children = []  # [(sec_idx, subsec_idx, section_title, child), ...] in outline order
+    sec_idx = 1
+    for sec in outline.sections:
+        subsec_idx = 1
+        for child in sec.children:
+            flat_children.append((sec_idx, subsec_idx, sec.title, child))
+            subsec_idx += 1
+        sec_idx += 1
+
+    title_word_cache = {
+        id(child): _significant_words(child.title) for *_ , child in flat_children
     }
 
-    assembled_sections = []
+    assignments = {id(child): [] for *_, child in flat_children}  # id(child) -> [resp, ...]
+    unmatched_responses = []
 
+    for resp in generated_responses:
+        # Scored on the question's own text ONLY — NOT resp.basedOn. basedOn
+        # is a knowledge-base *category* label (e.g. "security_compliance"),
+        # not real RFP/outline language, and including it caused its own
+        # false positive during testing: a training/support question tagged
+        # basedOn="security_compliance" matched into an "E-Verify Compliance"
+        # section purely because both happen to contain the word
+        # "compliance" — completely unrelated to what the question actually
+        # asks. The question text alone is a far more reliable signal.
+        q_words = _significant_words(resp.question)
+        best_child = None
+        best_score = 0
+        for *_, child in flat_children:
+            score = _match_score(q_words, title_word_cache[id(child)])
+            if score > best_score:
+                best_score = score
+                best_child = child
+        if best_child is not None:
+            assignments[id(best_child)].append(resp)
+        else:
+            unmatched_responses.append(resp)
+
+    # --- Pass 2: build assembled_sections using those assignments ---
+    assembled_sections = []
     sec_idx = 1
     for sec in outline.sections:
         section_number = f"{sec_idx}.0"
         sub_sections = []
-        
+
         subsec_idx = 1
         for child in sec.children:
             child_number = f"{sec_idx}.{subsec_idx}"
             child_title_lower = child.title.lower()
-            
-            matched_answers = []
-
-            # Match extracted questions/answers to this specific subsection
-            for resp in generated_responses:
-                q_text = resp.question.lower()
-                tag = (resp.basedOn or "").lower()
-
-                # Find matching target key
-                for rule_key, keywords in section_mapping_rules.items():
-                    if rule_key in child_title_lower:
-                        if any(kw in q_text or kw in tag for kw in keywords):
-                            if resp not in matched_answers:
-                                matched_answers.append(resp)
+            matched_answers = assignments[id(child)]
 
             # Build narrative text for this subsection
             if matched_answers:
@@ -137,6 +202,29 @@ def assemble_proposal_content(
             "sub_sections": sub_sections
         })
         sec_idx += 1
+
+    # --- Appendix: anything that shared zero significant words with EVERY
+    # outline section title. Rather than silently dropping these (or, worse,
+    # force-matching them somewhere wrong the way the old keyword-substring
+    # approach did), they get one final catch-all section so every drafted
+    # answer always makes it into the document, even if a human still needs
+    # to manually move it to the right spot. ---
+    if unmatched_responses:
+        content_blocks = [
+            f"**Requirement / Question:** {ans.question}\n\n"
+            f"**{company_name} Proposed Solution:**\n{ans.response}"
+            for ans in unmatched_responses
+        ]
+        assembled_sections.append({
+            "number": f"{sec_idx}.0",
+            "title": "Additional Requirements & Responses",
+            "sub_sections": [{
+                "number": f"{sec_idx}.1",
+                "title": "Drafted Answers Not Matched to a Specific Outline Section",
+                "content": "\n\n".join(content_blocks),
+                "qa_pairs": unmatched_responses,
+            }],
+        })
 
     return assembled_sections
 

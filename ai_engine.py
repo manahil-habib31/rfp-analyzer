@@ -29,7 +29,7 @@ from openai import OpenAI
 from checklist_items import CHECKLIST_ITEMS, CATEGORY_ORDER, CATEGORY_META
 from schemas import RFPAnalysis, RFPCoreAnalysis, ComplianceChecklist, build_category_checklist_schema, ProposalOutline, ResponseGenerationResult
 from knowledge_base import get_full_knowledge_base
-from decision_rules import apply_hard_rules
+from decision_rules import correct_compliance_items, apply_verdict_tag_override
 from scoring import compute_scores, compute_deliverable_totals, compute_final_verdict
 
 # Routed through OpenRouter (https://openrouter.ai), which proxies to OpenAI
@@ -134,18 +134,33 @@ Produce:
 - "keyDatesBudget": {{"submissionDeadline", "submissionDeadlineISO" (YYYY-MM-DD or null),
   "contractValueUSD" (number or null), "paymentTermsDays" (number or null),
   "insuranceAmountUSD" (number or null), "bondRequired" (true/false/null), "bondDetails"}}.
+  For insuranceAmountUSD specifically: search the ENTIRE document (insurance requirements are
+  often in a later "Insurance"/"Terms and Conditions" section, not near the top) for language
+  like "general liability", "combined single limits", "coverage of $X", "policy limits of $X",
+  or similar — extract the highest/primary liability coverage dollar figure mentioned. This
+  field feeds a hard GO/NO-GO threshold rule downstream, so a missed extraction here directly
+  causes a wrong verdict even when the insurance amount is clearly stated elsewhere in the RFP.
 - "risks": 3-6 entries, each {{"risk", "severity": "HIGH"|"MEDIUM"|"LOW", "note"}},
   covering the most significant reasons to hesitate on this bid.
 - "strengths": 3-6 entries, each {{"point", "note"}}, covering the most significant reasons
   TO pursue this bid — favorable terms, strong capability alignment, relationship value, etc.
-- "questions": every DIRECT question the RFP poses to the vendor — distinct from the fixed
-  compliance checklist, since these vary RFP to RFP. Look for phrasing like "Describe your...",
-  "Explain your...", "Provide details on...", "How does your company...". Examples: "Describe
-  your company's experience with similar projects", "Explain your security approach", "Provide
-  pricing information", "Explain your development methodology". Do NOT include the fixed
-  checklist-style requirements (those are handled separately) — only genuine open-ended
-  questions the vendor must answer in prose. Extract every one found, however many that is;
-  do not stop after 3-4. Each has:
+- "questions": every DIRECT question or open-ended narrative ask the RFP poses to the vendor —
+  distinct from the fixed compliance checklist, since these vary RFP to RFP. RFPs phrase these
+  many different ways — don't only look for literal "Describe..."/"Explain..." wording. Also
+  watch for: "Provide a narrative addressing...", "Include a description of...", "Vendors must
+  detail...", "Submit a written response covering...", "Include information on...", "Discuss
+  your...", "Bidders shall address...", "Respondents must outline...", or a requirement written
+  as an instruction rather than a literal question mark (e.g. "The proposal must address the
+  offeror's approach to X" is a narrative ask even without a "?"). Examples: "Describe your
+  company's experience with similar projects", "Explain your security approach", "Provide
+  pricing information", "The technical proposal must address the vendor's implementation
+  methodology". Do NOT include the fixed checklist-style requirements (forms, affidavits,
+  attachments, registrations — those are handled separately) — only genuine open-ended asks the
+  vendor must answer in prose. Extract every one found, however many that is; do not stop after
+  3-4. It's normal and correct for this list to end up genuinely EMPTY for a straightforward
+  procurement (e.g. an IFB purely for reselling a specific product/subscription with only
+  administrative/checklist requirements and no narrative technical-approach section) — don't
+  invent a question just to have something here. Each has:
     - "question": the question itself, as close to verbatim as reasonable.
     - "docRef": which source document this came from (see the document-marker note above).
       Set to null for a single-document RFP or if you can't tell.
@@ -190,6 +205,25 @@ For EACH item, decide:
 - "status": "GO" (requirement is satisfied or favorable given the company profile),
   "NO-GO" (requirement is not satisfied, or a hard threshold is exceeded), or
   "REVIEW" (needs a human judgment call, or the RFP doesn't provide enough detail).
+- CRITICAL — how to handle "the RFP doesn't mention this item at all": whether
+  silence is good or bad news depends on what KIND of item it is. Do not default
+  to NO-GO just because something isn't mentioned — that's only correct when
+  silence is genuinely bad news.
+    - EXTRA-BURDEN items (a bond, a specific certification like MBE/Small
+      Business, an extra insurance rider, a specific compliance declaration) —
+      if the RFP text never asks for one, that is GOOD news: there's nothing
+      for the company to fail. Use "GO" (e.g. "The RFP does not require a bid
+      bond — no action needed"), never "NO-GO". Reserve "NO-GO" for when the
+      RFP DOES explicitly require something and the company's profile clearly
+      cannot meet it, or a stated numeric threshold is exceeded.
+    - CAPABILITY/PROOF items (relevant experience, technical capability,
+      qualified personnel) where the RFP gives no way to judge fit either way
+      — use "REVIEW" with gapType "Requires Clarification": there's genuinely
+      not enough information to call it GO or NO-GO.
+  Sanity check before finalizing each item: if your own "reason" text concludes
+  the RFP simply doesn't require something, the status must not be "NO-GO" —
+  that would directly contradict your own reasoning (an absent requirement
+  cannot itself be a failure to meet a requirement).
 - "gapType": ONLY set this when status is "REVIEW" (leave it null for GO and NO-GO). Choose:
     - "Partially Matched" — the RFP DOES address this item, and the company's profile
       partially meets it, but not clearly enough to call it a firm GO (e.g. the RFP asks
@@ -540,30 +574,49 @@ def analyze_rfp(rfp_text: str, company_profile: dict, api_key: str, doc_names: l
         data = _parse_fallback_json(core_result, "core analysis")
 
     # --- Calls 2-5: compliance checklist, one call per department ---
-    all_raw_items = []
+    merged_compliance = []
     compliance_errors = []
     for category in CATEGORY_ORDER:
-        cat_count = len([it for it in CHECKLIST_ITEMS if it["category"] == category])
-        if cat_count == 0:
+        cat_expected = [it for it in CHECKLIST_ITEMS if it["category"] == category]
+        if not cat_expected:
             continue
+        raw_items = []
         try:
             prompt = _build_compliance_system_prompt(company_profile, category, doc_names)
-            schema = build_category_checklist_schema(cat_count)
+            schema = build_category_checklist_schema(len(cat_expected))
             result = _call_openai_with_retry(client, prompt, rfp_text, schema, max_output_tokens=8192)
             if hasattr(result, "model_dump"):
-                all_raw_items.extend(result.model_dump()["items"])
+                raw_items = result.model_dump()["items"]
             else:
                 parsed = _parse_fallback_json(result, f"{category} checklist")
-                all_raw_items.extend(parsed.get("items", parsed if isinstance(parsed, list) else []))
+                raw_items = parsed.get("items", parsed if isinstance(parsed, list) else [])
         except (QuotaExhaustedError, AnalysisError) as e:
             # Don't let one department's failure take down the whole analysis —
-            # record it and let _merge_compliance fill those items with the
-            # "not returned" placeholder so the rest of the report still works.
+            # record it and let _merge_compliance_category fill those items with
+            # the "not returned" placeholder so the rest of the report still works.
             compliance_errors.append(f"{CATEGORY_META[category]['title']}: {e}")
 
-    data["compliance"] = _merge_compliance(all_raw_items)
+        # Merged PER CATEGORY, right here, using only this department's own
+        # expected items and this department's own raw response — this
+        # scoping matters for _merge_compliance_category's positional
+        # fallback tier, which must never pair an item from one department
+        # with a leftover unmatched item from a DIFFERENT department.
+        merged_compliance.extend(_merge_compliance_category(cat_expected, raw_items))
+
+    data["compliance"] = merged_compliance
     if compliance_errors:
         data["complianceWarnings"] = compliance_errors
+
+    # Correct Payment Terms / Insurance Requirements BEFORE scoring — this
+    # must happen first, not after (the original bug): computing department
+    # scores from the AI's raw, pre-correction judgment while the checklist
+    # table below shows the corrected status produces a visible
+    # contradiction (e.g. checklist row says "Payment Terms: GO" but the
+    # department summary above it says "fails for: Payment Terms"), because
+    # both are rendered from the same data["compliance"] list at different
+    # points in the pipeline. See decision_rules.py's module docstring.
+    data = correct_compliance_items(data, company_profile)
+
     data["departmentScores"] = compute_scores(data["compliance"])
 
     # Blend the AI's three sub-scores with the deterministic compliance score
@@ -572,10 +625,11 @@ def analyze_rfp(rfp_text: str, company_profile: dict, api_key: str, doc_names: l
     data["verdict"] = compute_final_verdict(
         data["verdict"], data["departmentScores"]["overall"]["score"]
     )
-    # Hard-rule overrides (payment terms, insurance) run AFTER the blend, since
-    # they're policy, not opinion, and must be able to override the blended
-    # tag regardless of what the weighted score came out to.
-    data = apply_hard_rules(data, company_profile)
+    # Hard-rule tag override runs AFTER the blend, since it overrides the
+    # blended {tag, score} shape which doesn't exist until compute_final_verdict
+    # runs — this is policy, not opinion, and must be able to override the
+    # blended tag regardless of what the weighted score came out to.
+    data = apply_verdict_tag_override(data)
 
     data["deliverableTotals"] = compute_deliverable_totals(data.get("deliverables", []))
 
@@ -592,17 +646,71 @@ def analyze_rfp(rfp_text: str, company_profile: dict, api_key: str, doc_names: l
     return data
 
 
-def _merge_compliance(ai_items: list) -> list:
-    by_name = {}
-    for it in ai_items or []:
-        name = (it or {}).get("item")
-        if name:
-            by_name[name.strip().lower()] = it
+def _merge_compliance_category(cat_expected: list, raw_items: list) -> list:
+    """
+    Matches ONE department's raw AI response items back to that SAME
+    department's expected checklist items by name. Called once per category
+    from analyze_rfp()'s loop — never mixes items across departments, which
+    matters for tier 3 below (positional fallback must only ever pair items
+    that were genuinely part of the same API call).
 
-    merged = []
-    for ci in CHECKLIST_ITEMS:
-        found = by_name.get(ci["item"].strip().lower())
-        merged.append({
+    The system prompt tells the model to use "the exact item name given (do
+    not paraphrase or rename)" — but that's still just prose the model
+    doesn't always follow perfectly, and a single reworded item name used to
+    mean that item's real, correctly-judged answer got silently discarded
+    and replaced with a generic "Not returned by the model" placeholder,
+    even though the model DID answer it (this is what happened to 5 of 6
+    Financial/Accounting items in one real run).
+
+    Three-tier matching, in order:
+      1. Exact match (case/whitespace-insensitive) — the common case.
+      2. Fuzzy match (difflib similarity >= 0.72) — catches minor rewording
+         ("Financial Stability" vs "Financial Stability Requirements").
+      3. Positional fallback — if raw_items has exactly as many entries as
+         cat_expected (the structured-output schema enforces this count)
+         and some are STILL unmatched after tiers 1-2, the prompt also
+         explicitly asked for items "in this exact order" — so zip the
+         remaining unmatched raw items to the remaining unmatched expected
+         items by position, in order, as a last resort rather than
+         discarding real content just because its name didn't match.
+    """
+    import difflib
+
+    used_ids = set()
+    rows = []
+
+    for ci in cat_expected:
+        target_name = ci["item"].strip().lower()
+        found = None
+
+        # Tier 1: exact match
+        for it in raw_items or []:
+            if id(it) in used_ids:
+                continue
+            name = ((it or {}).get("item") or "").strip().lower()
+            if name == target_name:
+                found = it
+                break
+
+        # Tier 2: fuzzy match
+        if found is None:
+            best_ratio, best_it = 0.0, None
+            for it in raw_items or []:
+                if id(it) in used_ids:
+                    continue
+                name = ((it or {}).get("item") or "").strip().lower()
+                if not name:
+                    continue
+                ratio = difflib.SequenceMatcher(None, name, target_name).ratio()
+                if ratio > best_ratio:
+                    best_ratio, best_it = ratio, it
+            if best_ratio >= 0.72:
+                found = best_it
+
+        if found is not None:
+            used_ids.add(id(found))
+
+        rows.append({
             "category": ci["category"],
             "item": ci["item"],
             "question": ci["question"],
@@ -613,4 +721,20 @@ def _merge_compliance(ai_items: list) -> list:
             "docRef": (found or {}).get("docRef"),
             "pageRef": (found or {}).get("pageRef"),
         })
-    return merged
+
+    # Tier 3: positional fallback, ONLY within this one category's own call.
+    remaining_raw = [it for it in (raw_items or []) if id(it) not in used_ids and (it or {}).get("item")]
+    remaining_rows = [
+        row for row, ci in zip(rows, cat_expected)
+        if row["reason"] == "Not returned by the model — re-run the analysis or check this item manually."
+    ]
+    if remaining_raw and len(remaining_raw) == len(remaining_rows):
+        for row, it in zip(remaining_rows, remaining_raw):
+            row["status"] = it.get("status", "REVIEW")
+            row["gapType"] = it.get("gapType")
+            row["reason"] = it.get("reason", row["reason"])
+            row["evidence"] = it.get("evidence")
+            row["docRef"] = it.get("docRef")
+            row["pageRef"] = it.get("pageRef")
+
+    return rows
